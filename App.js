@@ -1,15 +1,24 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TextInput, TouchableOpacity, SafeAreaView, ActivityIndicator, Alert } from 'react-native';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TextInput,
+  TouchableOpacity,
+  SafeAreaView,
+  ActivityIndicator,
+  Alert
+} from 'react-native';
 import { supabase } from './supabase';
 
-// Import your custom screens
+// Import custom screens
 import HostGame from './screens/HostGame';
 import Lobby from './screens/Lobby';
 import Scanner from './components/Scanner';
 
 export default function App() {
   const [session, setSession] = useState(null);
-  const [currentScreen, setCurrentScreen] = useState('menu');
+  const [currentScreen, setCurrentScreen] = useState('menu'); // menu, host, join, lobby
   const [activeGameId, setActiveGameId] = useState(null);
 
   // Auth State
@@ -17,7 +26,7 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // 1. Listen for Auth Changes
+  // 1. Monitor Auth Session
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
@@ -30,56 +39,55 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // 2. Robust Auth Handlers
+  // 2. Auth Handlers
   async function handleLogin() {
-    if (!email || !password) {
-      Alert.alert("Error", "Please enter both email and password.");
-      return;
-    }
+    if (!email || !password) return Alert.alert("Error", "Please fill in all fields");
     setLoading(true);
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password: password
-    });
-
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) Alert.alert("Login Failed", error.message);
-    else setSession(data.session);
     setLoading(false);
   }
 
   async function handleSignUp() {
-    if (!email || !password) {
-      Alert.alert("Error", "Please provide email and password.");
-      return;
-    }
+    if (!email || !password) return Alert.alert("Error", "Please fill in all fields");
     setLoading(true);
-    const { error } = await supabase.auth.signUp({
-      email: email.trim(),
-      password: password
-    });
-
-    if (error) Alert.alert("Sign Up Error", error.message);
-    else Alert.alert("Success", "Account created! You can now sign in.");
+    const { error } = await supabase.auth.signUp({ email, password });
+    if (error) {
+      Alert.alert("Sign Up Error", error.message);
+    } else {
+      Alert.alert("Success", "Account created! You can now sign in.");
+    }
     setLoading(false);
   }
 
-  // 3. Joining Logic
+  // 3. Player Joining Logic
   const joinGame = async (gameId) => {
+    setLoading(true);
+    // Attempt to add the player to the participants table
     const { error } = await supabase
       .from('game_participants')
-      .insert([{ game_id: gameId, user_id: session.user.id }]);
+      .insert([{
+        game_id: gameId,
+        user_id: session.user.id
+      }]);
 
-    if (error && error.code !== '23505') {
-      Alert.alert("Join Error", error.message);
-    } else {
-      setActiveGameId(gameId);
-      setCurrentScreen('lobby');
+    if (error) {
+      // code 23505 means the player is already in this game's lobby
+      if (error.code !== '23505') {
+        Alert.alert("Error Joining", error.message);
+        setLoading(false);
+        return;
+      }
     }
+
+    setActiveGameId(gameId);
+    setCurrentScreen('lobby');
+    setLoading(false);
   };
 
-  // --- RENDERING ---
+  // --- RENDER LOGIC ---
 
-  // Auth Screen (Gatekeeper)
+  // Auth Screen (Sign In / Sign Up)
   if (!session) {
     return (
       <SafeAreaView style={styles.container}>
@@ -88,16 +96,14 @@ export default function App() {
           <TextInput
             placeholder="Email"
             style={styles.input}
-            onChangeText={(text) => setEmail(text)}
-            value={email}
+            onChangeText={setEmail}
             autoCapitalize="none"
           />
           <TextInput
             placeholder="Password"
             style={styles.input}
             secureTextEntry
-            onChangeText={(text) => setPassword(text)}
-            value={password}
+            onChangeText={setPassword}
           />
           <TouchableOpacity style={styles.button} onPress={handleLogin} disabled={loading}>
             {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Sign In</Text>}
@@ -110,18 +116,24 @@ export default function App() {
     );
   }
 
-  // Main Game Menu
+  // Authenticated Screen Flow
   return (
     <SafeAreaView style={styles.container}>
       {currentScreen === 'menu' && (
         <View style={styles.inner}>
           <Text style={styles.logo}>sleuth.</Text>
+
           <TouchableOpacity style={styles.button} onPress={() => setCurrentScreen('host')}>
             <Text style={styles.buttonText}>Host a Game</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.button, styles.secondaryButton]} onPress={() => setCurrentScreen('join')}>
+
+          <TouchableOpacity
+            style={[styles.button, { backgroundColor: '#444', marginTop: 15 }]}
+            onPress={() => setCurrentScreen('join')}
+          >
             <Text style={styles.buttonText}>Join a Game</Text>
           </TouchableOpacity>
+
           <TouchableOpacity style={{ marginTop: 50 }} onPress={() => supabase.auth.signOut()}>
             <Text style={[styles.link, { color: 'red' }]}>Sign Out</Text>
           </TouchableOpacity>
@@ -159,10 +171,23 @@ export default function App() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#fff' },
   inner: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30 },
-  logo: { fontSize: 48, fontWeight: 'bold', marginBottom: 50, letterSpacing: -2 },
-  input: { width: '100%', borderBottomWidth: 2, borderColor: '#000', padding: 15, fontSize: 18, marginBottom: 20 },
-  button: { backgroundColor: '#000', padding: 18, borderRadius: 10, width: '100%', alignItems: 'center' },
-  secondaryButton: { backgroundColor: '#444', marginTop: 15 },
+  logo: { fontSize: 56, fontWeight: 'bold', marginBottom: 50, letterSpacing: -3 },
+  input: {
+    width: '100%',
+    borderWidth: 1.5,
+    borderColor: '#eee',
+    padding: 18,
+    borderRadius: 15,
+    marginBottom: 15,
+    fontSize: 16
+  },
+  button: {
+    backgroundColor: '#000',
+    padding: 20,
+    borderRadius: 15,
+    width: '100%',
+    alignItems: 'center'
+  },
   buttonText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
-  link: { fontSize: 16, fontWeight: '600', color: 'blue' }
+  link: { fontSize: 16, fontWeight: '600', color: '#007AFF' }
 });
