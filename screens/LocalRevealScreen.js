@@ -15,21 +15,31 @@ export default function LocalRevealScreen({ gameId, onFinish }) {
     }, []);
 
     async function fetchData() {
-        // 1. Get all participants for this local game
-        const { data: pData } = await supabase
-            .from('game_participants')
-            .select('id, manual_name')
-            .eq('game_id', gameId);
+        setLoading(true); // Ensure loading is true at start
+        try {
+            // 1. Get all participants
+            const { data: pData, error: pError } = await supabase
+                .from('game_participants')
+                .select('id, manual_name')
+                .eq('game_id', gameId);
 
-        // 2. Get all assigned missions for this game
-        const { data: mData } = await supabase
-            .from('user_missions')
-            .select('id, participant_id, mission_library(task_description)')
-            .eq('game_id', gameId);
+            if (pError) throw pError;
 
-        if (pData) setParticipants(pData);
-        if (mData) setMissions(mData);
-        setLoading(false);
+            // 2. Get missions
+            const { data: mData, error: mError } = await supabase
+                .from('user_missions')
+                .select('id, participant_id, mission_library(task_description)')
+                .eq('game_id', gameId);
+
+            if (mError) throw mError;
+
+            setParticipants(pData || []);
+            setMissions(mData || []);
+        } catch (error) {
+            console.error("Error fetching missions:", error.message);
+        } finally {
+            setLoading(false);
+        }
     }
 
     const currentPlayer = participants[currentIndex];

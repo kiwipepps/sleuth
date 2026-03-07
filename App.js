@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { SafeAreaView, StyleSheet, View, ActivityIndicator, StatusBar } from 'react-native';
+import { StyleSheet, View, ActivityIndicator, StatusBar } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from './supabase';
 
 // Screens
@@ -22,6 +23,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [isSetupVisible, setSetupVisible] = useState(false);
 
+  // 1. Handle Authentication State
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
@@ -35,7 +37,7 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // Listen for Game Start (For Online Games)
+  // 2. Real-time Listener for Online Game Starts
   useEffect(() => {
     if (!activeGameId || currentScreen !== 'lobby') return;
 
@@ -55,10 +57,29 @@ export default function App() {
     return () => supabase.removeChannel(gameChannel);
   }, [activeGameId, currentScreen]);
 
+  // 3. Navigation Handlers
+  const handleJoinGame = (gameId, screen, hostId = null) => {
+    setActiveGameId(gameId);
+    if (hostId) setActiveGameHostId(hostId);
+    setCurrentScreen(screen);
+  };
+
+  const handleCreateSuccess = (gameId, nextScreen, hostId) => {
+    setActiveGameId(gameId);
+    setActiveGameHostId(hostId);
+    setSetupVisible(false);
+    setCurrentScreen(nextScreen);
+  };
+
   if (loading) {
-    return <View style={styles.center}><ActivityIndicator size="large" color="#000" /></View>;
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#000" />
+      </View>
+    );
   }
 
+  // Auth Guard
   if (!session) {
     return authMode === 'login' ? (
       <LoginScreen onSignUpLink={() => setAuthMode('signup')} />
@@ -68,50 +89,53 @@ export default function App() {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="dark-content" />
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.container} edges={['right', 'left']}>
+        <StatusBar barStyle="dark-content" />
 
-      {currentScreen === 'home' && (
-        <HomeScreen
-          activeGame={null} // You can add logic to fetch an existing live game here
-          onCreatePress={() => setSetupVisible(true)}
-        />
-      )}
+        {/* Home Feed: Shows your ongoing games */}
+        {currentScreen === 'home' && (
+          <HomeScreen
+            onCreatePress={() => setSetupVisible(true)}
+            onJoinGame={handleJoinGame}
+          />
+        )}
 
-      {currentScreen === 'lobby' && (
-        <Lobby
-          gameId={activeGameId}
-          isHost={session.user.id === activeGameHostId}
-          onBack={() => setCurrentScreen('home')}
-        />
-      )}
+        {/* Lobby: Wait for online players */}
+        {currentScreen === 'lobby' && (
+          <Lobby
+            gameId={activeGameId}
+            isHost={session.user.id === activeGameHostId}
+            onBack={() => setCurrentScreen('home')}
+          />
+        )}
 
-      {currentScreen === 'local-reveal' && (
-        <LocalRevealScreen
-          gameId={activeGameId}
-          onFinish={() => setCurrentScreen('play')}
-        />
-      )}
+        {/* Local Reveal: Pass the phone to see missions */}
+        {currentScreen === 'local-reveal' && (
+          <LocalRevealScreen
+            gameId={activeGameId}
+            onFinish={() => setCurrentScreen('play')}
+          />
+        )}
 
-      {currentScreen === 'play' && (
-        <PlayScreen
-          gameId={activeGameId}
+        {/* Play: The Active Dashboard */}
+        {currentScreen === 'play' && (
+          <PlayScreen
+            gameId={activeGameId}
+            userId={session.user.id}
+            onBack={() => setCurrentScreen('home')}
+          />
+        )}
+
+        {/* Creation Modal */}
+        <GameSetupModal
+          visible={isSetupVisible}
           userId={session.user.id}
+          onClose={() => setSetupVisible(false)}
+          onCreated={handleCreateSuccess}
         />
-      )}
-
-      <GameSetupModal
-        visible={isSetupVisible}
-        userId={session.user.id}
-        onClose={() => setSetupVisible(false)}
-        onCreated={(gameId, nextScreen, hostId) => {
-          setActiveGameId(gameId);
-          setActiveGameHostId(hostId);
-          setSetupVisible(false);
-          setCurrentScreen(nextScreen);
-        }}
-      />
-    </SafeAreaView>
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 

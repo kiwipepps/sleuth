@@ -11,6 +11,7 @@
   "dependencies": {
     "@react-native-community/datetimepicker": "8.4.4",
     "@supabase/supabase-js": "^2.98.0",
+    "base64-arraybuffer": "^1.0.2",
     "expo": "^54.0.0",
     "expo-camera": "~17.0.10",
     "expo-image-picker": "~17.0.10",

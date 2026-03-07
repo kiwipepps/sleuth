@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import {
     Modal, View, Text, StyleSheet, TextInput, TouchableOpacity,
-    ScrollView, Image, Switch, Alert, SafeAreaView, FlatList, KeyboardAvoidingView, Platform
+    ScrollView, Image, Switch, Alert, SafeAreaView, KeyboardAvoidingView, Platform
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
+import { decode } from 'base64-arraybuffer'; // ensure you ran: npm install base64-arraybuffer
 import { supabase } from '../supabase';
 import MissionPackModal from './MissionPackModal';
 
@@ -30,15 +31,32 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
             allowsEditing: true,
             aspect: [16, 9],
             quality: 0.5,
+            base64: true,
         });
-        if (!result.canceled) setImage(result.assets[0].uri);
+        if (!result.canceled) setImage(result.assets[0]);
     };
 
-    const addPlayerSlot = () => setLocalPlayers([...localPlayers, '']);
-    const updatePlayerName = (text, index) => {
-        const updated = [...localPlayers];
-        updated[index] = text;
-        setLocalPlayers(updated);
+    const uploadCoverImage = async (asset) => {
+        try {
+            const fileExt = asset.uri.split('.').pop();
+            const fileName = `${Date.now()}.${fileExt}`;
+            const filePath = `covers/${userId}/${fileName}`;
+
+            const { error: uploadError } = await supabase.storage
+                .from('game-covers')
+                .upload(filePath, decode(asset.base64), {
+                    contentType: `image/${fileExt}`,
+                    upsert: true
+                });
+
+            if (uploadError) throw uploadError;
+
+            const { data } = supabase.storage.from('game-covers').getPublicUrl(filePath);
+            return data.publicUrl;
+        } catch (error) {
+            console.error('Image upload failed:', error.message);
+            return null;
+        }
     };
 
     const handleNext = () => {
@@ -52,11 +70,17 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
     const finalizeGame = async () => {
         setLoading(true);
         try {
-            // 1. Create the Game
+            // 1. Upload Image
+            let publicImageUrl = null;
+            if (image) {
+                publicImageUrl = await uploadCoverImage(image);
+            }
+
+            // 2. Create the Game
             const { data: game, error: gameError } = await supabase.from('games').insert([{
                 host_id: userId,
                 game_name: gameName,
-                cover_image: image,
+                cover_image: publicImageUrl,
                 is_local: isLocal,
                 end_time: endDate.toISOString(),
                 pack_id: selectedPack.id,
@@ -67,8 +91,9 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
 
             if (gameError) throw gameError;
 
+            // 3. Handle Participants and Missions
             if (isLocal) {
-                // 2. Add local participants
+                // Insert local participants and get their IDs back
                 const participantEntries = localPlayers
                     .filter(name => name.trim() !== '')
                     .map(name => ({ game_id: game.id, manual_name: name }));
@@ -80,29 +105,38 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
 
                 if (pError) throw pError;
 
-                // 3. Auto-deal missions for Local Game
-                const { data: missionPool } = await supabase
+                // 4. Fetch the mission pool for this pack
+                const { data: missionPool, error: mError } = await supabase
                     .from('mission_library')
                     .select('id')
                     .eq('pack_id', selectedPack.id);
 
-                for (const p of participants) {
-                    const selectedMissions = [...missionPool]
-                        .sort(() => 0.5 - Math.random())
-                        .slice(0, parseInt(missionCount))
-                        .map(m => ({
-                            game_id: game.id,
-                            participant_id: p.id,
-                            mission_id: m.id
-                        }));
-
-                    await supabase.from('user_missions').insert(selectedMissions);
+                if (mError || !missionPool || missionPool.length === 0) {
+                    throw new Error("No missions found in this pack. Please pick another.");
                 }
 
-                // Navigate to local-reveal
+                // 5. RANDOM ASSIGNMENT LOGIC
+                // For each player, shuffle the pool and take the limit
+                const assignmentPromises = participants.map(participant => {
+                    const shuffled = [...missionPool].sort(() => 0.5 - Math.random());
+                    const selected = shuffled.slice(0, parseInt(missionCount));
+
+                    const missionEntries = selected.map(m => ({
+                        game_id: game.id,
+                        participant_id: participant.id,
+                        mission_id: m.id,
+                        is_completed: false
+                    }));
+
+                    return supabase.from('user_missions').insert(missionEntries);
+                });
+
+                // Wait for all assignments to finish before proceeding
+                await Promise.all(assignmentPromises);
+
                 onCreated(game.id, 'local-reveal', userId);
             } else {
-                // 4. Online Game: Host joins as first participant
+                // Online Game: Host joins as first participant
                 await supabase.from('game_participants').insert([{ game_id: game.id, user_id: userId }]);
                 onCreated(game.id, 'lobby', userId);
             }
@@ -122,6 +156,12 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
         setLocalPlayers(['', '']);
         setIsLocal(false);
         onClose();
+    };
+
+    const updatePlayerName = (text, index) => {
+        const updated = [...localPlayers];
+        updated[index] = text;
+        setLocalPlayers(updated);
     };
 
     return (
@@ -144,7 +184,7 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                         {step === 1 ? (
                             <>
                                 <TouchableOpacity style={styles.imagePicker} onPress={pickImage}>
-                                    {image ? <Image source={{ uri: image }} style={styles.preview} /> :
+                                    {image ? <Image source={{ uri: image.uri }} style={styles.preview} /> :
                                         <View style={styles.imagePlaceholder}>
                                             <Ionicons name="camera-outline" size={40} color="#ccc" />
                                             <Text style={styles.placeholderText}>Add Cover Photo</Text>
@@ -152,14 +192,23 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                                 </TouchableOpacity>
 
                                 <Text style={styles.label}>Operation Name</Text>
-                                <TextInput style={styles.input} placeholder="e.g. The Cotswolds Heist" value={gameName} onChangeText={setGameName} />
+                                <TextInput
+                                    style={styles.input}
+                                    placeholder="e.g. The Cotswolds Heist"
+                                    value={gameName}
+                                    onChangeText={setGameName}
+                                />
 
                                 <View style={styles.row}>
                                     <View>
                                         <Text style={styles.rowTitle}>Local Game</Text>
                                         <Text style={styles.rowSub}>Pass-and-play on this device</Text>
                                     </View>
-                                    <Switch value={isLocal} onValueChange={setIsLocal} trackColor={{ false: "#ddd", true: "#000" }} />
+                                    <Switch
+                                        value={isLocal}
+                                        onValueChange={setIsLocal}
+                                        trackColor={{ false: "#ddd", true: "#000" }}
+                                    />
                                 </View>
 
                                 <Text style={styles.label}>Selected Intelligence</Text>
@@ -173,21 +222,38 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                                 <View style={styles.statsRow}>
                                     <View style={styles.statBox}>
                                         <Text style={styles.label}>Missions</Text>
-                                        <TextInput style={styles.smallInput} keyboardType="numeric" value={missionCount} onChangeText={setMissionCount} />
+                                        <TextInput
+                                            style={styles.smallInput}
+                                            keyboardType="numeric"
+                                            value={missionCount}
+                                            onChangeText={setMissionCount}
+                                        />
                                     </View>
                                     <View style={styles.statBox}>
                                         <Text style={styles.label}>Callouts</Text>
-                                        <TextInput style={styles.smallInput} keyboardType="numeric" value={calloutCount} onChangeText={setCalloutCount} />
+                                        <TextInput
+                                            style={styles.smallInput}
+                                            keyboardType="numeric"
+                                            value={calloutCount}
+                                            onChangeText={setCalloutCount}
+                                        />
                                     </View>
                                 </View>
 
                                 <Text style={styles.label}>Deadline</Text>
                                 <TouchableOpacity style={styles.input} onPress={() => setShowDatePicker(true)}>
-                                    <Text style={{ fontSize: 16 }}>{endDate.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</Text>
+                                    <Text style={{ fontSize: 16 }}>
+                                        {endDate.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
+                                    </Text>
                                 </TouchableOpacity>
 
                                 {showDatePicker && (
-                                    <DateTimePicker value={endDate} mode="datetime" display="spinner" onChange={(e, date) => { setShowDatePicker(false); if (date) setEndDate(date); }} />
+                                    <DateTimePicker
+                                        value={endDate}
+                                        mode="datetime"
+                                        display="spinner"
+                                        onChange={(e, date) => { setShowDatePicker(false); if (date) setEndDate(date); }}
+                                    />
                                 )}
                             </>
                         ) : (
@@ -203,10 +269,11 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                                         onChangeText={(text) => updatePlayerName(text, index)}
                                     />
                                 ))}
-                                <TouchableOpacity style={styles.addPlayerBtn} onPress={addPlayerSlot}>
+                                <TouchableOpacity style={styles.addPlayerBtn} onPress={() => setLocalPlayers([...localPlayers, ''])}>
                                     <Ionicons name="add-circle-outline" size={20} color="#666" />
                                     <Text style={styles.addPlayerText}>Add Another Agent</Text>
                                 </TouchableOpacity>
+                                <View style={{ height: 100 }} />
                             </View>
                         )}
                     </ScrollView>
