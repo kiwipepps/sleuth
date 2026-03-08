@@ -6,7 +6,7 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
-import { decode } from 'base64-arraybuffer'; // ensure you ran: npm install base64-arraybuffer
+import { decode } from 'base64-arraybuffer';
 import { supabase } from '../supabase';
 import MissionPackModal from './MissionPackModal';
 
@@ -70,13 +70,12 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
     const finalizeGame = async () => {
         setLoading(true);
         try {
-            // 1. Upload Image
             let publicImageUrl = null;
             if (image) {
                 publicImageUrl = await uploadCoverImage(image);
             }
 
-            // 2. Create the Game
+            // 1. Create the Game record
             const { data: game, error: gameError } = await supabase.from('games').insert([{
                 host_id: userId,
                 game_name: gameName,
@@ -91,9 +90,8 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
 
             if (gameError) throw gameError;
 
-            // 3. Handle Participants and Missions
             if (isLocal) {
-                // Insert local participants and get their IDs back
+                // 2. Insert all local participants
                 const participantEntries = localPlayers
                     .filter(name => name.trim() !== '')
                     .map(name => ({ game_id: game.id, manual_name: name }));
@@ -105,18 +103,17 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
 
                 if (pError) throw pError;
 
-                // 4. Fetch the mission pool for this pack
+                // 3. Fetch the mission pool
                 const { data: missionPool, error: mError } = await supabase
                     .from('mission_library')
                     .select('id')
                     .eq('pack_id', selectedPack.id);
 
                 if (mError || !missionPool || missionPool.length === 0) {
-                    throw new Error("No missions found in this pack. Please pick another.");
+                    throw new Error("No missions found in this pack.");
                 }
 
-                // 5. RANDOM ASSIGNMENT LOGIC
-                // For each player, shuffle the pool and take the limit
+                // 4. Individual Mission Assignment
                 const assignmentPromises = participants.map(participant => {
                     const shuffled = [...missionPool].sort(() => 0.5 - Math.random());
                     const selected = shuffled.slice(0, parseInt(missionCount));
@@ -125,18 +122,17 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                         game_id: game.id,
                         participant_id: participant.id,
                         mission_id: m.id,
-                        is_completed: false
+                        completed: false // FIXED: Corrected column name to match DB
                     }));
 
                     return supabase.from('user_missions').insert(missionEntries);
                 });
 
-                // Wait for all assignments to finish before proceeding
                 await Promise.all(assignmentPromises);
 
                 onCreated(game.id, 'local-reveal', userId);
             } else {
-                // Online Game: Host joins as first participant
+                // Online Game initial join
                 await supabase.from('game_participants').insert([{ game_id: game.id, user_id: userId }]);
                 onCreated(game.id, 'lobby', userId);
             }
