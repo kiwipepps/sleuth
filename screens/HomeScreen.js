@@ -189,7 +189,6 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                         renderItem={renderGameItem}
                         contentContainerStyle={styles.list}
                         showsVerticalScrollIndicator={false}
-                        // ListHeaderComponent removed to get rid of welcome message
                         refreshControl={
                             <RefreshControl refreshing={refreshing} onRefresh={() => fetchUserGames(userId)} tintColor="#000" />
                         }

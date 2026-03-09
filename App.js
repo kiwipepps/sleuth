@@ -7,9 +7,10 @@ import { supabase } from './supabase';
 import LoginScreen from './screens/LoginScreen';
 import SignUpScreen from './screens/SignUpScreen';
 import HomeScreen from './screens/HomeScreen';
-import Lobby from './screens/Lobby';
+import Lobby from './screens/Lobby'; // Restored original name
 import PlayScreen from './screens/PlayScreen';
 import LocalRevealScreen from './screens/LocalRevealScreen';
+import DebriefScreen from './screens/DebriefScreen'; // Ensure you created this file!
 
 // Modals
 import GameSetupModal from './screens/GameSetupModal';
@@ -61,7 +62,13 @@ export default function App() {
   const handleJoinGame = (gameId, screen, hostId = null) => {
     setActiveGameId(gameId);
     if (hostId) setActiveGameHostId(hostId);
-    setCurrentScreen(screen);
+    
+    // Logic for Completed Games: Always route to Debrief
+    if (screen === 'debrief' || screen === 'completed') {
+      setCurrentScreen('debrief');
+    } else {
+      setCurrentScreen(screen);
+    }
   };
 
   const handleCreateSuccess = (gameId, nextScreen, hostId) => {
@@ -93,7 +100,7 @@ export default function App() {
       <SafeAreaView style={styles.container} edges={['right', 'left']}>
         <StatusBar barStyle="dark-content" />
 
-        {/* Home Feed: Shows your ongoing games */}
+        {/* Home Feed */}
         {currentScreen === 'home' && (
           <HomeScreen
             onCreatePress={() => setSetupVisible(true)}
@@ -110,7 +117,7 @@ export default function App() {
           />
         )}
 
-        {/* Local Reveal: Pass the phone to see missions */}
+        {/* Local Reveal */}
         {currentScreen === 'local-reveal' && (
           <LocalRevealScreen
             gameId={activeGameId}
@@ -123,6 +130,14 @@ export default function App() {
           <PlayScreen
             gameId={activeGameId}
             userId={session.user.id}
+            onBack={() => setCurrentScreen('home')}
+          />
+        )}
+
+        {/* Debrief: The Summary/Results Screen */}
+        {currentScreen === 'debrief' && (
+          <DebriefScreen
+            gameId={activeGameId}
             onBack={() => setCurrentScreen('home')}
           />
         )}

@@ -1,9 +1,9 @@
 import React, { useState, useRef } from 'react';
 import {
     Modal, View, Text, StyleSheet, TextInput, TouchableOpacity,
-    ScrollView, Image, Switch, Alert, KeyboardAvoidingView, Platform
+    ScrollView, Image, Switch, Alert, KeyboardAvoidingView, Platform, StatusBar
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
@@ -12,6 +12,7 @@ import { supabase } from '../supabase';
 import MissionPackModal from './MissionPackModal';
 
 export default function GameSetupModal({ visible, onClose, onCreated, userId }) {
+    const insets = useSafeAreaInsets(); // Precise notch height calculation
     const scrollRef = useRef(null);
     
     // FORM STATES
@@ -22,10 +23,7 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
     const [missionCount, setMissionCount] = useState(3);
     const [calloutCount, setCalloutCount] = useState(2);
     const [selectedPack, setSelectedPack] = useState(null);
-    
-    // UPDATED: Default deadline set to 24 hours from now
     const [endDate, setEndDate] = useState(new Date(Date.now() + 24 * 60 * 60 * 1000));
-    
     const [localPlayers, setLocalPlayers] = useState(['', '']);
     const [loading, setLoading] = useState(false);
     const [showDatePicker, setShowDatePicker] = useState(false);
@@ -44,36 +42,7 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
         if (!result.canceled) setImage(result.assets[0]);
     };
 
-    const uploadCoverImage = async (asset) => {
-        try {
-            const fileExt = asset.uri.split('.').pop();
-            const fileName = `${Date.now()}.${fileExt}`;
-            const filePath = `covers/${userId}/${fileName}`;
-
-            const { error: uploadError } = await supabase.storage
-                .from('game-covers')
-                .upload(filePath, decode(asset.base64), {
-                    contentType: `image/${fileExt}`,
-                    upsert: true
-                });
-
-            if (uploadError) throw uploadError;
-            const { data } = supabase.storage.from('game-covers').getPublicUrl(filePath);
-            return data.publicUrl;
-        } catch (error) {
-            console.error('Image upload failed:', error.message);
-            return null;
-        }
-    };
-
-    const handleNext = () => {
-        if (!gameName || !selectedPack) {
-            return Alert.alert("Required", "Please name your game and pick a mission pack.");
-        }
-        if (isLocal) setStep(2);
-        else finalizeGame();
-    };
-
+    // RESTORED: Scroll-to-bottom logic for Deadline
     const toggleDatePicker = () => {
         const nextState = !showDatePicker;
         setShowDatePicker(nextState);
@@ -84,14 +53,35 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
         }
     };
 
+    const uploadCoverImage = async (asset) => {
+        try {
+            const fileExt = asset.uri.split('.').pop();
+            const fileName = `${Date.now()}.${fileExt}`;
+            const filePath = `covers/${userId}/${fileName}`;
+            const { error: uploadError } = await supabase.storage
+                .from('game-covers')
+                .upload(filePath, decode(asset.base64), {
+                    contentType: `image/${fileExt}`,
+                    upsert: true
+                });
+            if (uploadError) throw uploadError;
+            const { data } = supabase.storage.from('game-covers').getPublicUrl(filePath);
+            return data.publicUrl;
+        } catch (error) {
+            return null;
+        }
+    };
+
+    const handleNext = () => {
+        if (!gameName || !selectedPack) return Alert.alert("Required", "Please name your game and pick a mission pack.");
+        if (isLocal) setStep(2);
+        else finalizeGame();
+    };
+
     const finalizeGame = async () => {
         setLoading(true);
         try {
-            let publicImageUrl = null;
-            if (image) {
-                publicImageUrl = await uploadCoverImage(image);
-            }
-
+            let publicImageUrl = image ? await uploadCoverImage(image) : null;
             const { data: game, error: gameError } = await supabase.from('games').insert([{
                 host_id: userId,
                 game_name: gameName,
@@ -107,47 +97,27 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
             if (gameError) throw gameError;
 
             if (isLocal) {
-                const participantEntries = localPlayers
-                    .filter(name => name.trim() !== '')
-                    .map(name => ({ game_id: game.id, manual_name: name }));
-
-                const { data: participants, error: pError } = await supabase
-                    .from('game_participants')
-                    .insert(participantEntries)
-                    .select();
-
-                if (pError) throw pError;
-
-                const { data: missionPool, error: mError } = await supabase
-                    .from('mission_library')
-                    .select('id')
-                    .eq('pack_id', selectedPack.id);
-
-                if (mError || !missionPool || missionPool.length === 0) {
-                    throw new Error("No missions found in this pack.");
-                }
+                const participantEntries = localPlayers.filter(name => name.trim() !== '').map(name => ({ game_id: game.id, manual_name: name }));
+                const { data: participants } = await supabase.from('game_participants').insert(participantEntries).select();
+                const { data: missionPool } = await supabase.from('mission_library').select('id').eq('pack_id', selectedPack.id);
 
                 const assignmentPromises = participants.map(participant => {
                     const shuffled = [...missionPool].sort(() => 0.5 - Math.random());
                     const selected = shuffled.slice(0, missionCount);
-
                     const missionEntries = selected.map(m => ({
                         game_id: game.id,
                         participant_id: participant.id,
                         mission_id: m.id,
                         completed: false 
                     }));
-
                     return supabase.from('user_missions').insert(missionEntries);
                 });
-
                 await Promise.all(assignmentPromises);
                 onCreated(game.id, 'local-reveal', userId);
             } else {
                 await supabase.from('game_participants').insert([{ game_id: game.id, user_id: userId }]);
                 onCreated(game.id, 'lobby', userId);
             }
-
             resetForm();
         } catch (e) {
             Alert.alert("Error", e.message);
@@ -157,12 +127,7 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
     };
 
     const resetForm = () => {
-        setStep(1); 
-        setGameName(''); 
-        setImage(null); 
-        setLocalPlayers(['', '']); 
-        setIsLocal(false); 
-        // Reset to default 24h deadline on reset
+        setStep(1); setGameName(''); setImage(null); setLocalPlayers(['', '']); setIsLocal(false); 
         setEndDate(new Date(Date.now() + 24 * 60 * 60 * 1000));
         onClose();
     };
@@ -175,17 +140,24 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
 
     return (
         <Modal visible={visible} animationType="slide" presentationStyle="fullScreen">
-            <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-                <View style={styles.header}>
-                    <TouchableOpacity onPress={step === 1 ? onClose : () => setStep(1)}>
-                        <Ionicons name={step === 1 ? "close" : "arrow-back"} size={28} />
-                    </TouchableOpacity>
-                    <Text style={styles.headerTitle}>{step === 1 ? "New Operation" : "Identify Agents"}</Text>
-                    <TouchableOpacity onPress={step === 1 ? handleNext : finalizeGame} disabled={loading}>
-                        <Text style={styles.saveBtn}>
-                            {loading ? "..." : (step === 1 ? (isLocal ? "Next" : "Create") : "Start")}
-                        </Text>
-                    </TouchableOpacity>
+            {/* CONTAINER WITH TOP INSET FIX */}
+            <View style={[styles.container, { paddingTop: insets.top }]}>
+                <StatusBar barStyle="dark-content" />
+                
+                <View style={styles.headerWrapper}>
+                    <View style={styles.header}>
+                        <TouchableOpacity onPress={step === 1 ? onClose : () => setStep(1)} style={styles.touchArea}>
+                            <Ionicons name={step === 1 ? "close" : "arrow-back"} size={28} color="#000" />
+                        </TouchableOpacity>
+                        
+                        <Text style={styles.headerTitle}>{step === 1 ? "New Operation" : "Identify Agents"}</Text>
+                        
+                        <TouchableOpacity onPress={step === 1 ? handleNext : finalizeGame} disabled={loading} style={styles.touchArea}>
+                            <Text style={styles.saveBtn}>
+                                {loading ? "..." : (step === 1 ? (isLocal ? "Next" : "Create") : "Start")}
+                            </Text>
+                        </TouchableOpacity>
+                    </View>
                 </View>
 
                 <KeyboardAvoidingView 
@@ -196,6 +168,7 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                         ref={scrollRef} 
                         style={styles.form} 
                         showsVerticalScrollIndicator={false}
+                        contentContainerStyle={{ paddingBottom: 100 }}
                     >
                         {step === 1 ? (
                             <>
@@ -283,7 +256,6 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                                         />
                                     </View>
                                 )}
-                                <View style={{ height: 40 }} />
                             </>
                         ) : (
                             <View>
@@ -302,7 +274,6 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                                     <Ionicons name="add-circle-outline" size={20} color="#666" />
                                     <Text style={styles.addPlayerText}>Add Another Agent</Text>
                                 </TouchableOpacity>
-                                <View style={{ height: 100 }} />
                             </View>
                         )}
                     </ScrollView>
@@ -313,15 +284,34 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                     onClose={() => setPackModalVisible(false)}
                     onSelect={(pack) => setSelectedPack(pack)}
                 />
-            </SafeAreaView>
+            </View>
         </Modal>
     );
 }
 
 const styles = StyleSheet.create({
     container: { flex: 1, backgroundColor: '#fff' },
-    header: { flexDirection: 'row', justifyContent: 'space-between', padding: 20, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#f0f0f0' },
-    headerTitle: { fontSize: 18, fontWeight: '800', letterSpacing: -0.5 },
+    headerWrapper: {
+        borderBottomWidth: 1, 
+        borderBottomColor: '#f0f0f0',
+        backgroundColor: '#fff',
+        zIndex: 10,
+    },
+    header: { 
+        flexDirection: 'row', 
+        justifyContent: 'space-between', 
+        paddingHorizontal: 15, 
+        paddingBottom: 10,
+        paddingTop: 10,
+        alignItems: 'center',
+    },
+    touchArea: {
+        minWidth: 50,
+        minHeight: 50,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    headerTitle: { fontSize: 18, fontWeight: '800', letterSpacing: -0.5, textAlign: 'center' },
     saveBtn: { color: '#000', fontWeight: '900', fontSize: 16 },
     form: { padding: 25, flex: 1 },
     imagePicker: { width: '100%', height: 180, backgroundColor: '#f5f5f5', borderRadius: 20, marginBottom: 25, overflow: 'hidden', borderWidth: 1, borderColor: '#eee', borderStyle: 'dashed' },
