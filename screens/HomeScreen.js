@@ -1,12 +1,52 @@
 import React, { useState, useEffect } from 'react';
 import {
     View, Text, StyleSheet, FlatList, TouchableOpacity,
-    Image, ActivityIndicator, RefreshControl, SafeAreaView, Platform, StatusBar, Alert
+    Image, ActivityIndicator, RefreshControl, Platform, StatusBar, Alert, Dimensions
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../supabase';
+import ProfileScreen from './ProfileScreen';
+
+const screenWidth = Dimensions.get("window").width;
+
+// --- SUB-COMPONENT: LIVE TIMER ---
+const GameTimer = ({ endTime }) => {
+    const [timeLeft, setTimeLeft] = useState('');
+
+    useEffect(() => {
+        const calculateTime = () => {
+            const now = new Date().getTime();
+            const end = new Date(endTime).getTime();
+            const distance = end - now;
+
+            if (distance < 0) {
+                setTimeLeft("EXPIRED");
+                return;
+            }
+
+            const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+            const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+            const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+            setTimeLeft(`${hours}h ${minutes}m ${seconds}s`);
+        };
+
+        calculateTime();
+        const interval = setInterval(calculateTime, 1000);
+        return () => clearInterval(interval);
+    }, [endTime]);
+
+    return (
+        <View style={styles.timerBadge}>
+            <Ionicons name="time-outline" size={12} color="#fff" />
+            <Text style={styles.timerText}>{timeLeft}</Text>
+        </View>
+    );
+};
 
 export default function HomeScreen({ onCreatePress, onJoinGame }) {
+    const [activeTab, setActiveTab] = useState('home'); 
     const [games, setGames] = useState([]);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
@@ -54,11 +94,10 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
         }
     };
 
-    // --- NEW: DELETE FUNCTION ---
     const handleDeleteGame = async (gameId, gameName) => {
         Alert.alert(
             "Terminate Operation?",
-            `Are you sure you want to delete "${gameName}"? All mission data will be lost.`,
+            `Are you sure you want to delete "${gameName}"?`,
             [
                 { text: "Cancel", style: "cancel" },
                 {
@@ -66,14 +105,8 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                     style: "destructive",
                     onPress: async () => {
                         try {
-                            const { error } = await supabase
-                                .from('games')
-                                .delete()
-                                .eq('id', gameId);
-
+                            const { error } = await supabase.from('games').delete().eq('id', gameId);
                             if (error) throw error;
-
-                            // Remove from local state
                             setGames(prev => prev.filter(g => g.id !== gameId));
                         } catch (err) {
                             Alert.alert("Error", "Could not delete game.");
@@ -103,6 +136,7 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                     )}
 
                     <View style={styles.cardOverlay}>
+                        {status === 'active' && <GameTimer endTime={item.end_time} />}
                         <View style={[styles.statusBadge, status === 'active' ? styles.activeBadge : styles.lobbyBadge]}>
                             <Text style={styles.statusText}>{status.toUpperCase()}</Text>
                         </View>
@@ -125,7 +159,6 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                     </View>
                 </TouchableOpacity>
 
-                {/* DELETE ICON (Visible only to Host) */}
                 {isHost && (
                     <TouchableOpacity
                         style={styles.deleteIconBtn}
@@ -138,29 +171,25 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
         );
     };
 
-    return (
-        <SafeAreaView style={styles.safeArea}>
-            <StatusBar barStyle="dark-content" />
-            <View style={styles.container}>
-                <View style={styles.header}>
-                    <View>
-                        <Text style={styles.headerLabel}>Intelligence Brief</Text>
-                        <Text style={styles.headerTitle}>Operations</Text>
-                    </View>
-                    <TouchableOpacity onPress={onCreatePress} style={styles.addBtn}>
-                        <Ionicons name="add" size={28} color="#fff" />
-                    </TouchableOpacity>
-                </View>
+    const renderContent = () => {
+        if (loading) return <View style={styles.center}><ActivityIndicator size="large" color="#000" /></View>;
 
-                {loading ? (
-                    <View style={styles.center}><ActivityIndicator size="large" color="#000" /></View>
-                ) : (
+        switch (activeTab) {
+            case 'packs':
+                return <View style={styles.center}><Ionicons name="layers" size={60} color="#eee" /><Text style={styles.comingSoon}>Mission Packs Coming Soon</Text></View>;
+            case 'achievements':
+                return <View style={styles.center}><Ionicons name="trophy" size={60} color="#eee" /><Text style={styles.comingSoon}>Awards Coming Soon</Text></View>;
+            case 'profile':
+                return <ProfileScreen />;
+            default:
+                return (
                     <FlatList
                         data={games}
                         keyExtractor={(item) => item.id}
                         renderItem={renderGameItem}
                         contentContainerStyle={styles.list}
                         showsVerticalScrollIndicator={false}
+                        // ListHeaderComponent removed to get rid of welcome message
                         refreshControl={
                             <RefreshControl refreshing={refreshing} onRefresh={() => fetchUserGames(userId)} tintColor="#000" />
                         }
@@ -169,13 +198,54 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                                 <Ionicons name="document-text-outline" size={60} color="#f0f0f0" />
                                 <Text style={styles.emptyTitle}>No Missions Yet</Text>
                                 <Text style={styles.emptySub}>Create an operation to begin.</Text>
-                                <TouchableOpacity style={styles.emptyBtn} onPress={onCreatePress}>
-                                    <Text style={styles.emptyBtnText}>New Operation</Text>
-                                </TouchableOpacity>
                             </View>
                         }
                     />
+                );
+        }
+    };
+
+    return (
+        <SafeAreaView style={styles.safeArea} edges={['top']}>
+            <StatusBar barStyle="dark-content" />
+            <View style={styles.container}>
+                {activeTab === 'home' && (
+                    <View style={styles.header}>
+                        <View>
+                            <Text style={styles.headerLabel}>Intelligence Brief</Text>
+                            <Text style={styles.headerTitle}>Operations</Text>
+                        </View>
+                        <TouchableOpacity onPress={onCreatePress} style={styles.addBtn}>
+                            <Ionicons name="add" size={28} color="#fff" />
+                        </TouchableOpacity>
+                    </View>
                 )}
+
+                <View style={styles.content}>
+                    {renderContent()}
+                </View>
+
+                <View style={styles.navBar}>
+                    <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('home')}>
+                        <Ionicons name={activeTab === 'home' ? "home" : "home-outline"} size={22} color={activeTab === 'home' ? "#000" : "#aaa"} />
+                        <Text style={[styles.navText, activeTab === 'home' && styles.navTextActive]}>Home</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('packs')}>
+                        <Ionicons name={activeTab === 'packs' ? "layers" : "layers-outline"} size={22} color={activeTab === 'packs' ? "#000" : "#aaa"} />
+                        <Text style={[styles.navText, activeTab === 'packs' && styles.navTextActive]}>Packs</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('achievements')}>
+                        <Ionicons name={activeTab === 'achievements' ? "trophy" : "trophy-outline"} size={22} color={activeTab === 'achievements' ? "#000" : "#aaa"} />
+                        <Text style={[styles.navText, activeTab === 'achievements' && styles.navTextActive]}>Awards</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('profile')}>
+                        <Ionicons name={activeTab === 'profile' ? "person" : "person-outline"} size={22} color={activeTab === 'profile' ? "#000" : "#aaa"} />
+                        <Text style={[styles.navText, activeTab === 'profile' && styles.navTextActive]}>Profile</Text>
+                    </TouchableOpacity>
+                </View>
             </View>
         </SafeAreaView>
     );
@@ -189,13 +259,14 @@ const styles = StyleSheet.create({
         justifyContent: 'space-between',
         alignItems: 'center',
         paddingHorizontal: 25,
-        paddingTop: Platform.OS === 'android' ? 15 : 10,
-        paddingBottom: 20
+        paddingTop: 10,
+        paddingBottom: 15
     },
     headerLabel: { fontSize: 12, fontWeight: '700', color: '#aaa', textTransform: 'uppercase', letterSpacing: 1 },
     headerTitle: { fontSize: 32, fontWeight: '900', color: '#000', letterSpacing: -1 },
     addBtn: { backgroundColor: '#000', width: 48, height: 48, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
-    list: { paddingHorizontal: 20, paddingBottom: 40 },
+    content: { flex: 1 },
+    list: { paddingHorizontal: 20, paddingBottom: 40, paddingTop: 10 },
     cardWrapper: { position: 'relative', marginBottom: 20 },
     gameCard: {
         backgroundColor: '#fff', borderRadius: 24,
@@ -204,19 +275,38 @@ const styles = StyleSheet.create({
     },
     deleteIconBtn: {
         position: 'absolute',
-        top: 15,
-        left: 15,
+        bottom: 100,
+        right: 15,
         backgroundColor: 'rgba(255,255,255,0.9)',
         width: 36,
         height: 36,
         borderRadius: 18,
         justifyContent: 'center',
         alignItems: 'center',
-        zIndex: 10
+        zIndex: 10,
+        borderWidth: 1,
+        borderColor: '#eee'
     },
     cardImage: { width: '100%', height: 180 },
     placeholderContainer: { backgroundColor: '#f9f9f9', justifyContent: 'center', alignItems: 'center' },
-    cardOverlay: { position: 'absolute', top: 15, right: 15 },
+    cardOverlay: { 
+        position: 'absolute', 
+        top: 15, 
+        right: 15, 
+        flexDirection: 'row', 
+        gap: 8, 
+        alignItems: 'center' 
+    },
+    timerBadge: {
+        backgroundColor: 'rgba(0,0,0,0.75)',
+        paddingHorizontal: 10,
+        paddingVertical: 6,
+        borderRadius: 10,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 5
+    },
+    timerText: { color: '#fff', fontSize: 11, fontWeight: '900' },
     statusBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10 },
     activeBadge: { backgroundColor: '#E8F5E9' },
     lobbyBadge: { backgroundColor: '#FFF3E0' },
@@ -227,10 +317,22 @@ const styles = StyleSheet.create({
     metaText: { fontSize: 13, color: '#888', fontWeight: '500' },
     hostIndicator: { backgroundColor: '#000', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, marginLeft: 10 },
     hostIndicatorText: { color: '#fff', fontSize: 9, fontWeight: '900' },
+    navBar: {
+        flexDirection: 'row',
+        backgroundColor: '#fff',
+        paddingTop: 12,
+        paddingBottom: Platform.OS === 'ios' ? 25 : 15,
+        borderTopWidth: 1,
+        borderTopColor: '#f0f0f0',
+        justifyContent: 'space-around',
+        alignItems: 'center'
+    },
+    navItem: { alignItems: 'center', gap: 4 },
+    navText: { fontSize: 10, fontWeight: '800', color: '#aaa' },
+    navTextActive: { color: '#000' },
     center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-    emptyContainer: { alignItems: 'center', marginTop: 100, paddingHorizontal: 40 },
-    emptyTitle: { fontSize: 22, fontWeight: '900', marginTop: 15 },
-    emptySub: { fontSize: 15, color: '#aaa', textAlign: 'center', marginTop: 10, lineHeight: 22 },
-    emptyBtn: { marginTop: 30, backgroundColor: '#000', paddingHorizontal: 35, paddingVertical: 18, borderRadius: 20 },
-    emptyBtnText: { color: '#fff', fontWeight: '800', fontSize: 16 }
+    comingSoon: { marginTop: 15, color: '#ccc', fontWeight: '700' },
+    emptyContainer: { alignItems: 'center', marginTop: 50, paddingHorizontal: 40 },
+    emptyTitle: { fontSize: 20, fontWeight: '900', marginTop: 15 },
+    emptySub: { fontSize: 14, color: '#aaa', textAlign: 'center', marginTop: 10 }
 });

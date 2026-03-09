@@ -26,5 +26,8 @@
     "react-native-url-polyfill": "^3.0.0",
     "react-native-web": "^0.21.0"
   },
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "@react-native-community/cli": "^20.1.2"
+  }
 }

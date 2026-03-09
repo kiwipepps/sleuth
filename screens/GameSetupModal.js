@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
     Modal, View, Text, StyleSheet, TextInput, TouchableOpacity,
-    ScrollView, Image, Switch, Alert, SafeAreaView, KeyboardAvoidingView, Platform
+    ScrollView, Image, Switch, Alert, KeyboardAvoidingView, Platform
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
@@ -11,23 +12,30 @@ import { supabase } from '../supabase';
 import MissionPackModal from './MissionPackModal';
 
 export default function GameSetupModal({ visible, onClose, onCreated, userId }) {
+    const scrollRef = useRef(null);
+    
+    // FORM STATES
     const [step, setStep] = useState(1);
     const [gameName, setGameName] = useState('');
     const [image, setImage] = useState(null);
     const [isLocal, setIsLocal] = useState(false);
-    const [missionCount, setMissionCount] = useState('3');
-    const [calloutCount, setCalloutCount] = useState('2');
+    const [missionCount, setMissionCount] = useState(3);
+    const [calloutCount, setCalloutCount] = useState(2);
     const [selectedPack, setSelectedPack] = useState(null);
-    const [endDate, setEndDate] = useState(new Date());
+    
+    // UPDATED: Default deadline set to 24 hours from now
+    const [endDate, setEndDate] = useState(new Date(Date.now() + 24 * 60 * 60 * 1000));
+    
     const [localPlayers, setLocalPlayers] = useState(['', '']);
     const [loading, setLoading] = useState(false);
-
     const [showDatePicker, setShowDatePicker] = useState(false);
     const [isPackModalVisible, setPackModalVisible] = useState(false);
 
+    const selectionRange = [1, 2, 3, 4, 5];
+
     const pickImage = async () => {
         let result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.Images,
+            mediaTypes: ['images'], 
             allowsEditing: true,
             aspect: [16, 9],
             quality: 0.5,
@@ -50,7 +58,6 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                 });
 
             if (uploadError) throw uploadError;
-
             const { data } = supabase.storage.from('game-covers').getPublicUrl(filePath);
             return data.publicUrl;
         } catch (error) {
@@ -67,6 +74,16 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
         else finalizeGame();
     };
 
+    const toggleDatePicker = () => {
+        const nextState = !showDatePicker;
+        setShowDatePicker(nextState);
+        if (nextState) {
+            setTimeout(() => {
+                scrollRef.current?.scrollToEnd({ animated: true });
+            }, 150);
+        }
+    };
+
     const finalizeGame = async () => {
         setLoading(true);
         try {
@@ -75,7 +92,6 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                 publicImageUrl = await uploadCoverImage(image);
             }
 
-            // 1. Create the Game record
             const { data: game, error: gameError } = await supabase.from('games').insert([{
                 host_id: userId,
                 game_name: gameName,
@@ -83,15 +99,14 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                 is_local: isLocal,
                 end_time: endDate.toISOString(),
                 pack_id: selectedPack.id,
-                mission_limit: parseInt(missionCount),
-                callout_limit: parseInt(calloutCount),
+                mission_limit: missionCount,
+                callout_limit: calloutCount,
                 status: isLocal ? 'active' : 'lobby'
             }]).select().single();
 
             if (gameError) throw gameError;
 
             if (isLocal) {
-                // 2. Insert all local participants
                 const participantEntries = localPlayers
                     .filter(name => name.trim() !== '')
                     .map(name => ({ game_id: game.id, manual_name: name }));
@@ -103,7 +118,6 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
 
                 if (pError) throw pError;
 
-                // 3. Fetch the mission pool
                 const { data: missionPool, error: mError } = await supabase
                     .from('mission_library')
                     .select('id')
@@ -113,26 +127,23 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                     throw new Error("No missions found in this pack.");
                 }
 
-                // 4. Individual Mission Assignment
                 const assignmentPromises = participants.map(participant => {
                     const shuffled = [...missionPool].sort(() => 0.5 - Math.random());
-                    const selected = shuffled.slice(0, parseInt(missionCount));
+                    const selected = shuffled.slice(0, missionCount);
 
                     const missionEntries = selected.map(m => ({
                         game_id: game.id,
                         participant_id: participant.id,
                         mission_id: m.id,
-                        completed: false // FIXED: Corrected column name to match DB
+                        completed: false 
                     }));
 
                     return supabase.from('user_missions').insert(missionEntries);
                 });
 
                 await Promise.all(assignmentPromises);
-
                 onCreated(game.id, 'local-reveal', userId);
             } else {
-                // Online Game initial join
                 await supabase.from('game_participants').insert([{ game_id: game.id, user_id: userId }]);
                 onCreated(game.id, 'lobby', userId);
             }
@@ -146,11 +157,13 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
     };
 
     const resetForm = () => {
-        setStep(1);
-        setGameName('');
-        setImage(null);
-        setLocalPlayers(['', '']);
-        setIsLocal(false);
+        setStep(1); 
+        setGameName(''); 
+        setImage(null); 
+        setLocalPlayers(['', '']); 
+        setIsLocal(false); 
+        // Reset to default 24h deadline on reset
+        setEndDate(new Date(Date.now() + 24 * 60 * 60 * 1000));
         onClose();
     };
 
@@ -162,7 +175,7 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
 
     return (
         <Modal visible={visible} animationType="slide" presentationStyle="fullScreen">
-            <SafeAreaView style={styles.container}>
+            <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
                 <View style={styles.header}>
                     <TouchableOpacity onPress={step === 1 ? onClose : () => setStep(1)}>
                         <Ionicons name={step === 1 ? "close" : "arrow-back"} size={28} />
@@ -175,8 +188,15 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                     </TouchableOpacity>
                 </View>
 
-                <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-                    <ScrollView style={styles.form} showsVerticalScrollIndicator={false}>
+                <KeyboardAvoidingView 
+                    behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
+                    style={{ flex: 1 }}
+                >
+                    <ScrollView 
+                        ref={scrollRef} 
+                        style={styles.form} 
+                        showsVerticalScrollIndicator={false}
+                    >
                         {step === 1 ? (
                             <>
                                 <TouchableOpacity style={styles.imagePicker} onPress={pickImage}>
@@ -218,39 +238,52 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                                 <View style={styles.statsRow}>
                                     <View style={styles.statBox}>
                                         <Text style={styles.label}>Missions</Text>
-                                        <TextInput
-                                            style={styles.smallInput}
-                                            keyboardType="numeric"
-                                            value={missionCount}
-                                            onChangeText={setMissionCount}
-                                        />
+                                        <View style={styles.selectorGrid}>
+                                            {selectionRange.map((num) => (
+                                                <TouchableOpacity 
+                                                    key={num} 
+                                                    style={[styles.selectorItem, missionCount === num && styles.selectorItemActive]}
+                                                    onPress={() => setMissionCount(num)}
+                                                >
+                                                    <Text style={[styles.selectorText, missionCount === num && styles.selectorTextActive]}>{num}</Text>
+                                                </TouchableOpacity>
+                                            ))}
+                                        </View>
                                     </View>
                                     <View style={styles.statBox}>
                                         <Text style={styles.label}>Callouts</Text>
-                                        <TextInput
-                                            style={styles.smallInput}
-                                            keyboardType="numeric"
-                                            value={calloutCount}
-                                            onChangeText={setCalloutCount}
-                                        />
+                                        <View style={styles.selectorGrid}>
+                                            {selectionRange.map((num) => (
+                                                <TouchableOpacity 
+                                                    key={num} 
+                                                    style={[styles.selectorItem, calloutCount === num && styles.selectorItemActive]}
+                                                    onPress={() => setCalloutCount(num)}
+                                                >
+                                                    <Text style={[styles.selectorText, calloutCount === num && styles.selectorTextActive]}>{num}</Text>
+                                                </TouchableOpacity>
+                                            ))}
+                                        </View>
                                     </View>
                                 </View>
 
                                 <Text style={styles.label}>Deadline</Text>
-                                <TouchableOpacity style={styles.input} onPress={() => setShowDatePicker(true)}>
+                                <TouchableOpacity style={styles.input} onPress={toggleDatePicker}>
                                     <Text style={{ fontSize: 16 }}>
                                         {endDate.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
                                     </Text>
                                 </TouchableOpacity>
 
                                 {showDatePicker && (
-                                    <DateTimePicker
-                                        value={endDate}
-                                        mode="datetime"
-                                        display="spinner"
-                                        onChange={(e, date) => { setShowDatePicker(false); if (date) setEndDate(date); }}
-                                    />
+                                    <View style={styles.pickerWrapper}>
+                                        <DateTimePicker
+                                            value={endDate}
+                                            mode="datetime"
+                                            display={Platform.OS === 'ios' ? "spinner" : "default"}
+                                            onChange={(e, date) => { if (date) setEndDate(date); }}
+                                        />
+                                    </View>
                                 )}
+                                <View style={{ height: 40 }} />
                             </>
                         ) : (
                             <View>
@@ -305,7 +338,12 @@ const styles = StyleSheet.create({
     packPlaceholder: { fontSize: 16, color: '#ccc' },
     statsRow: { flexDirection: 'row', gap: 15, marginBottom: 25 },
     statBox: { flex: 1 },
-    smallInput: { backgroundColor: '#f9f9f9', padding: 18, borderRadius: 15, textAlign: 'center', fontSize: 20, fontWeight: '800' },
+    selectorGrid: { flexDirection: 'row', backgroundColor: '#f9f9f9', borderRadius: 12, padding: 4, justifyContent: 'space-between' },
+    selectorItem: { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: 10 },
+    selectorItemActive: { backgroundColor: '#000' },
+    selectorText: { fontSize: 14, fontWeight: '700', color: '#666' },
+    selectorTextActive: { color: '#fff' },
+    pickerWrapper: { backgroundColor: '#f9f9f9', borderRadius: 15, overflow: 'hidden', marginBottom: 20 },
     stepTitle: { fontSize: 28, fontWeight: '900', marginBottom: 10 },
     stepSub: { fontSize: 16, color: '#666', marginBottom: 30 },
     playerInput: { backgroundColor: '#f9f9f9', padding: 18, borderRadius: 15, marginBottom: 12, fontSize: 16, fontWeight: '600' },
