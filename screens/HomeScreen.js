@@ -11,7 +11,7 @@ import ProfileScreen from './ProfileScreen';
 const screenWidth = Dimensions.get("window").width;
 
 // --- SUB-COMPONENT: LIVE TIMER ---
-const GameTimer = ({ endTime }) => {
+const GameTimer = ({ endTime, onExpire }) => {
     const [timeLeft, setTimeLeft] = useState('');
 
     useEffect(() => {
@@ -20,12 +20,14 @@ const GameTimer = ({ endTime }) => {
             const end = new Date(endTime).getTime();
             const distance = end - now;
 
-            if (distance < 0) {
+            if (distance <= 0) {
                 setTimeLeft("EXPIRED");
+                if (onExpire) onExpire(); // Callback to parent to trigger DB update
                 return;
             }
 
-            const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+            // FIX: Removed the 24-hour modulo so it counts absolute total hours
+            const hours = Math.floor(distance / (1000 * 60 * 60));
             const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
             const seconds = Math.floor((distance % (1000 * 60)) / 1000);
 
@@ -38,7 +40,7 @@ const GameTimer = ({ endTime }) => {
     }, [endTime]);
 
     return (
-        <View style={styles.timerBadge}>
+        <View style={[styles.timerBadge, timeLeft === "EXPIRED" && styles.expiredBadge]}>
             <Ionicons name="time-outline" size={12} color="#fff" />
             <Text style={styles.timerText}>{timeLeft}</Text>
         </View>
@@ -62,6 +64,15 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
             setUserId(user.id);
             fetchUserGames(user.id);
         }
+    };
+
+    // New logic to sync Expired status with Database
+    const handleAutoArchive = async (gameId) => {
+        await supabase
+            .from('games')
+            .update({ status: 'completed' })
+            .eq('id', gameId)
+            .eq('status', 'active'); // Only update if it's currently active
     };
 
     const fetchUserGames = async (currentUserId) => {
@@ -119,13 +130,16 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
 
     const renderGameItem = ({ item }) => {
         const isHost = item.host_id === userId;
-        const status = item.status || 'lobby';
+        const isExpired = new Date(item.end_time).getTime() < new Date().getTime();
+        const displayStatus = (item.status === 'completed' || (item.status === 'active' && isExpired)) 
+            ? 'completed' 
+            : (item.status || 'lobby');
 
         return (
             <View style={styles.cardWrapper}>
                 <TouchableOpacity
                     style={styles.gameCard}
-                    onPress={() => onJoinGame(item.id, status === 'active' ? 'play' : 'lobby', item.host_id)}
+                    onPress={() => onJoinGame(item.id, displayStatus === 'active' ? 'play' : displayStatus === 'completed' ? 'debrief' : 'lobby', item.host_id)}
                 >
                     {item.cover_image ? (
                         <Image source={{ uri: item.cover_image }} style={styles.cardImage} />
@@ -136,9 +150,22 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                     )}
 
                     <View style={styles.cardOverlay}>
-                        {status === 'active' && <GameTimer endTime={item.end_time} />}
-                        <View style={[styles.statusBadge, status === 'active' ? styles.activeBadge : styles.lobbyBadge]}>
-                            <Text style={styles.statusText}>{status.toUpperCase()}</Text>
+                        {/* FIX: Only show the timer if the game is strictly 'active' */}
+                        {displayStatus === 'active' && (
+                            <GameTimer 
+                                endTime={item.end_time} 
+                                onExpire={() => handleAutoArchive(item.id)} 
+                            />
+                        )}
+                        
+                        <View style={[
+                            styles.statusBadge, 
+                            displayStatus === 'active' ? styles.activeBadge : 
+                            displayStatus === 'completed' ? styles.completedBadge : styles.lobbyBadge
+                        ]}>
+                            <Text style={[styles.statusText, displayStatus === 'completed' && styles.completedText]}>
+                                {displayStatus.toUpperCase()}
+                            </Text>
                         </View>
                     </View>
 
@@ -229,17 +256,14 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                         <Ionicons name={activeTab === 'home' ? "home" : "home-outline"} size={22} color={activeTab === 'home' ? "#000" : "#aaa"} />
                         <Text style={[styles.navText, activeTab === 'home' && styles.navTextActive]}>Home</Text>
                     </TouchableOpacity>
-
                     <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('packs')}>
                         <Ionicons name={activeTab === 'packs' ? "layers" : "layers-outline"} size={22} color={activeTab === 'packs' ? "#000" : "#aaa"} />
                         <Text style={[styles.navText, activeTab === 'packs' && styles.navTextActive]}>Packs</Text>
                     </TouchableOpacity>
-
                     <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('achievements')}>
                         <Ionicons name={activeTab === 'achievements' ? "trophy" : "trophy-outline"} size={22} color={activeTab === 'achievements' ? "#000" : "#aaa"} />
                         <Text style={[styles.navText, activeTab === 'achievements' && styles.navTextActive]}>Awards</Text>
                     </TouchableOpacity>
-
                     <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('profile')}>
                         <Ionicons name={activeTab === 'profile' ? "person" : "person-outline"} size={22} color={activeTab === 'profile' ? "#000" : "#aaa"} />
                         <Text style={[styles.navText, activeTab === 'profile' && styles.navTextActive]}>Profile</Text>
@@ -305,11 +329,14 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         gap: 5
     },
+    expiredBadge: { backgroundColor: 'rgba(255, 59, 48, 0.8)' },
     timerText: { color: '#fff', fontSize: 11, fontWeight: '900' },
     statusBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10 },
     activeBadge: { backgroundColor: '#E8F5E9' },
     lobbyBadge: { backgroundColor: '#FFF3E0' },
+    completedBadge: { backgroundColor: '#F5F5F5' },
     statusText: { fontSize: 10, fontWeight: '900', color: '#444' },
+    completedText: { color: '#aaa' },
     cardFooter: { padding: 20, flexDirection: 'row', alignItems: 'center' },
     gameName: { fontSize: 20, fontWeight: '800', color: '#000', marginBottom: 4 },
     metaRow: { flexDirection: 'row', alignItems: 'center' },

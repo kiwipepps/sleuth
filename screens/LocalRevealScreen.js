@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../supabase';
 
 export default function LocalRevealScreen({ gameId, onFinish }) {
+    const insets = useSafeAreaInsets(); // Precise notch handling
     const [participants, setParticipants] = useState([]);
     const [currentIndex, setCurrentIndex] = useState(0);
     const [isRevealed, setIsRevealed] = useState(false);
@@ -15,9 +17,8 @@ export default function LocalRevealScreen({ gameId, onFinish }) {
     }, []);
 
     async function fetchData() {
-        setLoading(true); // Ensure loading is true at start
+        setLoading(true);
         try {
-            // 1. Get all participants
             const { data: pData, error: pError } = await supabase
                 .from('game_participants')
                 .select('id, manual_name')
@@ -25,7 +26,6 @@ export default function LocalRevealScreen({ gameId, onFinish }) {
 
             if (pError) throw pError;
 
-            // 2. Get missions
             const { data: mData, error: mError } = await supabase
                 .from('user_missions')
                 .select('id, participant_id, mission_library(task_description)')
@@ -45,21 +45,37 @@ export default function LocalRevealScreen({ gameId, onFinish }) {
     const currentPlayer = participants[currentIndex];
     const playerMissions = missions.filter(m => m.participant_id === currentPlayer?.id);
 
-    const handleNext = () => {
+    const handleNext = async () => {
         if (currentIndex < participants.length - 1) {
             setIsRevealed(false);
             setCurrentIndex(currentIndex + 1);
         } else {
-            onFinish(); // All players have seen their missions, start the game!
+            setLoading(true);
+            try {
+                const { error } = await supabase
+                    .from('games')
+                    .update({ status: 'active' })
+                    .eq('id', gameId);
+                
+                if (error) throw error;
+                onFinish(); 
+            } catch (err) {
+                setLoading(false);
+                alert("Failed to start operation.");
+            }
         }
     };
 
-    if (loading || !currentPlayer) return null;
+    if (loading || !currentPlayer) return (
+        <View style={styles.center}>
+            <ActivityIndicator size="large" color="#000" />
+        </View>
+    );
 
     return (
-        <SafeAreaView style={styles.container}>
+        // Applying precise padding for the notch and home indicator
+        <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
             {!isRevealed ? (
-                // STATE 1: PASS THE PHONE
                 <View style={styles.center}>
                     <Ionicons name="hand-right-outline" size={80} color="#000" />
                     <Text style={styles.instruction}>Pass phone to</Text>
@@ -73,27 +89,30 @@ export default function LocalRevealScreen({ gameId, onFinish }) {
                     </TouchableOpacity>
                 </View>
             ) : (
-                // STATE 2: REVEAL INTEL
-                <View style={styles.intelContainer}>
+                // FIX: Changed View to ScrollView to handle large numbers of missions
+                <ScrollView 
+                    contentContainerStyle={styles.intelScrollContainer}
+                    showsVerticalScrollIndicator={false}
+                >
                     <Text style={styles.intelHeader}>Top Secret Orders</Text>
                     <Text style={styles.intelSub}>Memorize these, Agent {currentPlayer.manual_name}.</Text>
 
                     {playerMissions.map((m, i) => (
                         <View key={m.id} style={styles.missionCard}>
                             <Text style={styles.missionNumber}>MISSION 0{i + 1}</Text>
-                            <Text style={styles.missionText}>{m.mission_library.task_description}</Text>
+                            <Text style={styles.missionText}>{m.mission_library?.task_description}</Text>
                         </View>
                     ))}
-
+                    
                     <TouchableOpacity style={styles.doneBtn} onPress={handleNext}>
                         <Text style={styles.btnText}>
                             {currentIndex < participants.length - 1 ? "Next Agent" : "Start Operation"}
                         </Text>
                         <Ionicons name="arrow-forward" size={20} color="#fff" />
                     </TouchableOpacity>
-                </View>
+                </ScrollView>
             )}
-        </SafeAreaView>
+        </View>
     );
 }
 
@@ -104,12 +123,14 @@ const styles = StyleSheet.create({
     playerName: { fontSize: 48, fontWeight: '900', textAlign: 'center', marginBottom: 50 },
     actionBtn: { backgroundColor: '#000', paddingVertical: 20, paddingHorizontal: 40, borderRadius: 100 },
     btnText: { color: '#fff', fontWeight: 'bold', fontSize: 18 },
-
-    intelContainer: { flex: 1, padding: 30, justifyContent: 'center' },
-    intelHeader: { fontSize: 32, fontWeight: '900', marginBottom: 5 },
-    intelSub: { fontSize: 16, color: '#666', marginBottom: 40 },
+    
+    // FIX: Use flexGrow instead of flex. Centers when few items, scrolls when many.
+    intelScrollContainer: { flexGrow: 1, padding: 30, justifyContent: 'center' }, 
+    
+    intelHeader: { fontSize: 36, fontWeight: '900', marginBottom: 5, letterSpacing: -1, color: '#000' },
+    intelSub: { fontSize: 16, color: '#666', marginBottom: 30, fontWeight: '600' },
     missionCard: { backgroundColor: '#f9f9f9', padding: 25, borderRadius: 20, marginBottom: 15, borderWidth: 1, borderColor: '#eee' },
-    missionNumber: { fontSize: 10, fontWeight: '900', color: '#aaa', marginBottom: 5 },
-    missionText: { fontSize: 18, fontWeight: '600', lineHeight: 24 },
-    doneBtn: { backgroundColor: '#000', padding: 22, borderRadius: 20, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 10, marginTop: 20 }
+    missionNumber: { fontSize: 10, fontWeight: '900', color: '#aaa', marginBottom: 5, letterSpacing: 1 },
+    missionText: { fontSize: 18, fontWeight: '600', lineHeight: 24, color: '#111' },
+    doneBtn: { backgroundColor: '#000', padding: 22, borderRadius: 20, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 10, marginTop: 20, marginBottom: 20 }
 });

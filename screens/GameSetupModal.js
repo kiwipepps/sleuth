@@ -12,10 +12,9 @@ import { supabase } from '../supabase';
 import MissionPackModal from './MissionPackModal';
 
 export default function GameSetupModal({ visible, onClose, onCreated, userId }) {
-    const insets = useSafeAreaInsets(); // Precise notch height calculation
+    const insets = useSafeAreaInsets();
     const scrollRef = useRef(null);
     
-    // FORM STATES
     const [step, setStep] = useState(1);
     const [gameName, setGameName] = useState('');
     const [image, setImage] = useState(null);
@@ -42,7 +41,6 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
         if (!result.canceled) setImage(result.assets[0]);
     };
 
-    // RESTORED: Scroll-to-bottom logic for Deadline
     const toggleDatePicker = () => {
         const nextState = !showDatePicker;
         setShowDatePicker(nextState);
@@ -140,7 +138,6 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
 
     return (
         <Modal visible={visible} animationType="slide" presentationStyle="fullScreen">
-            {/* CONTAINER WITH TOP INSET FIX */}
             <View style={[styles.container, { paddingTop: insets.top }]}>
                 <StatusBar barStyle="dark-content" />
                 
@@ -161,17 +158,18 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                 </View>
 
                 <KeyboardAvoidingView 
-                    behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
+                    behavior={Platform.OS === 'ios' ? 'padding' : undefined} 
                     style={{ flex: 1 }}
                 >
                     <ScrollView 
                         ref={scrollRef} 
-                        style={styles.form} 
+                        style={{ flex: 1 }} 
                         showsVerticalScrollIndicator={false}
-                        contentContainerStyle={{ paddingBottom: 100 }}
+                        keyboardShouldPersistTaps="handled"
+                        contentContainerStyle={{ padding: 25, flexGrow: 1, paddingBottom: Platform.OS === 'ios' ? 100 : 50 }} 
                     >
                         {step === 1 ? (
-                            <>
+                            <View>
                                 <TouchableOpacity style={styles.imagePicker} onPress={pickImage}>
                                     {image ? <Image source={{ uri: image.uri }} style={styles.preview} /> :
                                         <View style={styles.imagePlaceholder}>
@@ -256,11 +254,12 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                                         />
                                     </View>
                                 )}
-                            </>
+                            </View>
                         ) : (
                             <View>
                                 <Text style={styles.stepTitle}>Enter Agent Names</Text>
                                 <Text style={styles.stepSub}>These players will share this device to see their missions.</Text>
+                                
                                 {localPlayers.map((item, index) => (
                                     <TextInput
                                         key={index}
@@ -268,9 +267,23 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                                         placeholder={`Agent ${index + 1} Name`}
                                         value={item}
                                         onChangeText={(text) => updatePlayerName(text, index)}
+                                        onFocus={() => {
+                                            setTimeout(() => {
+                                                scrollRef.current?.scrollToEnd({ animated: true });
+                                            }, 200);
+                                        }}
                                     />
                                 ))}
-                                <TouchableOpacity style={styles.addPlayerBtn} onPress={() => setLocalPlayers([...localPlayers, ''])}>
+                                
+                                <TouchableOpacity 
+                                    style={styles.addPlayerBtn} 
+                                    onPress={() => {
+                                        setLocalPlayers([...localPlayers, '']);
+                                        setTimeout(() => {
+                                            scrollRef.current?.scrollToEnd({ animated: true });
+                                        }, 100);
+                                    }}
+                                >
                                     <Ionicons name="add-circle-outline" size={20} color="#666" />
                                     <Text style={styles.addPlayerText}>Add Another Agent</Text>
                                 </TouchableOpacity>
@@ -313,7 +326,6 @@ const styles = StyleSheet.create({
     },
     headerTitle: { fontSize: 18, fontWeight: '800', letterSpacing: -0.5, textAlign: 'center' },
     saveBtn: { color: '#000', fontWeight: '900', fontSize: 16 },
-    form: { padding: 25, flex: 1 },
     imagePicker: { width: '100%', height: 180, backgroundColor: '#f5f5f5', borderRadius: 20, marginBottom: 25, overflow: 'hidden', borderWidth: 1, borderColor: '#eee', borderStyle: 'dashed' },
     preview: { width: '100%', height: '100%' },
     imagePlaceholder: { flex: 1, justifyContent: 'center', alignItems: 'center' },
