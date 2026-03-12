@@ -26,6 +26,8 @@ export default function PlayScreen({ gameId, onBack, userId }) {
     const [selectedTarget, setSelectedTarget] = useState(null);
     const [calloutDescription, setCalloutDescription] = useState('');
     const [userCalloutCount, setUserCalloutCount] = useState(0);
+    
+    // Penalty States
     const [pendingAccusation, setPendingAccusation] = useState(null);
     const [isSelectingFailure, setIsSelectingFailure] = useState(false);
 
@@ -38,12 +40,21 @@ export default function PlayScreen({ gameId, onBack, userId }) {
     }, [gameId, userId]);
 
     useEffect(() => {
-        if (!gameData || gameData.is_local) return;
+        if (!gameData) return;
 
         const intelSub = supabase.channel(`intel-${gameId}`)
             .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'call_outs', filter: `game_id=eq.${gameId}` }, 
-            (payload) => {
+            async (payload) => {
                 setGlobalIntel(prev => [payload.new, ...prev]);
+                
+                // REAL-TIME POPUP: If online and someone calls ME out, show the modal instantly!
+                if (!gameData.is_local) {
+                    const { data: myPart } = await supabase.from('game_participants').select('id').eq('game_id', gameId).eq('user_id', userId).single();
+                    if (myPart && payload.new.target_id === myPart.id) {
+                        const report = await fetchPendingAccusations(myPart.id);
+                        if (report) setPendingAccusation(report);
+                    }
+                }
             }).subscribe();
 
         const missionSub = supabase.channel(`missions-${gameId}`)
@@ -104,6 +115,16 @@ export default function PlayScreen({ gameId, onBack, userId }) {
         ]);
     };
 
+    // FIX: Abstracted this so we can call it on load and during real-time updates
+    async function fetchPendingAccusations(participantId) {
+        const { data: reports } = await supabase.from('call_outs')
+            .select('*, game_participants!caller_id(id, manual_name, profiles(username))')
+            .eq('target_id', participantId)
+            .eq('is_resolved', false).limit(1);
+        
+        return (reports && reports.length > 0) ? reports[0] : null;
+    }
+
     async function fetchInitialData() {
         setLoading(true);
         try {
@@ -127,6 +148,10 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                     fetchMissions(me.id);
                     fetchUserCalloutCount(me.id);
                     fetchGlobalIntel();
+                    
+                    // FIX: Check for accusations immediately upon loading the screen!
+                    const report = await fetchPendingAccusations(me.id);
+                    if (report) setPendingAccusation(report);
                 }
             }
         } catch (error) {
@@ -217,13 +242,10 @@ export default function PlayScreen({ gameId, onBack, userId }) {
     const handleConfirmHandover = async () => {
         if (!activeParticipant) return;
         await fetchUserCalloutCount(activeParticipant.id);
-        const { data: reports } = await supabase.from('call_outs')
-            .select('*, game_participants!caller_id(manual_name)')
-            .eq('target_id', activeParticipant.id)
-            .eq('is_resolved', false).limit(1);
-
-        if (reports && reports.length > 0) {
-            setPendingAccusation(reports[0]);
+        
+        const report = await fetchPendingAccusations(activeParticipant.id);
+        if (report) {
+            setPendingAccusation(report);
         } else {
             fetchMissions(activeParticipant.id);
             setIsBriefingMode(false);
@@ -234,7 +256,10 @@ export default function PlayScreen({ gameId, onBack, userId }) {
         try {
             await supabase.from('call_outs').update({ is_resolved: true, status: isCorrect ? 'accepted' : 'incorrect' }).eq('id', pendingAccusation.id);
             setPendingAccusation(null);
-            setIsBriefingMode(false);
+            
+            if (gameData?.is_local) {
+                setIsBriefingMode(false);
+            }
 
             if (isCorrect) {
                 await fetchMissions(activeParticipant.id);
@@ -279,7 +304,6 @@ export default function PlayScreen({ gameId, onBack, userId }) {
     const isHost = gameData?.host_id === userId;
     const calloutsRemaining = gameData ? Math.max(0, gameData.callout_limit - userCalloutCount) : 0;
 
-    // --- REUSABLE DASHBOARD COMPONENT ---
     const renderDashboard = () => (
         <View style={styles.dashboardContainer}>
             <Text style={styles.dashboardTitle}>Global Intelligence</Text>
@@ -325,7 +349,6 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                 ) : <View style={styles.touchArea} />}
             </View>
 
-            {/* --- LOCAL MODE NAVIGATION --- */}
             {gameData?.is_local && (
                 <View style={styles.agentBar}>
                     <Text style={styles.agentLabel}>Select Agent:</Text>
@@ -342,7 +365,6 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                 </View>
             )}
 
-            {/* --- ONLINE MODE NAVIGATION --- */}
             {!gameData?.is_local && (
                 <View style={styles.onlineTabsContainer}>
                     <TouchableOpacity style={[styles.onlineTab, activeTab === 'missions' && styles.onlineActiveTab]} onPress={() => setActiveTab('missions')}>
@@ -356,14 +378,12 @@ export default function PlayScreen({ gameId, onBack, userId }) {
 
             <View style={styles.content}>
                 
-                {/* GLOBAL DASHBOARD (Local Mode Only) */}
                 {gameData?.is_local && !activeParticipant && (
                     <ScrollView contentContainerStyle={styles.listPadding} showsVerticalScrollIndicator={false}>
                         {renderDashboard()}
                     </ScrollView>
                 )}
 
-                {/* HANDOVER SCREEN (Local Mode Only) */}
                 {gameData?.is_local && activeParticipant && isBriefingMode ? (
                     <View style={styles.briefingContainer}>
                         <Ionicons name="hand-right-outline" size={80} color="#000" />
@@ -375,7 +395,6 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                     </View>
                 ) : null}
 
-                {/* MISSIONS LIST */}
                 {(gameData?.is_local && activeParticipant && !isBriefingMode) || (!gameData?.is_local && activeTab === 'missions') ? (
                     <>
                         <View style={styles.sectionHeader}>
@@ -401,7 +420,6 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                     </>
                 ) : null}
 
-                {/* GLOBAL INTEL LIST (Online 'intel' tab only) */}
                 {!gameData?.is_local && activeTab === 'intel' && (
                     <FlatList
                         ListHeaderComponent={renderDashboard}
@@ -424,7 +442,6 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                 )}
             </View>
 
-            {/* CALL OUT BUTTON */}
             {activeParticipant && gameData?.status === 'active' && (!gameData?.is_local || !isBriefingMode) && (
                 <View style={styles.footer}>
                     <TouchableOpacity style={[styles.callOutBtn, calloutsRemaining <= 0 && { backgroundColor: '#666', shadowColor: 'transparent' }]} onPress={() => setCallOutVisible(true)} disabled={calloutsRemaining <= 0}>
@@ -434,7 +451,6 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                 </View>
             )}
 
-            {/* CALL OUT MODAL */}
             <Modal visible={isCallOutVisible} transparent animationType="fade">
                 <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
                     <View style={styles.modalOverlay}>
@@ -478,14 +494,19 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                 </KeyboardAvoidingView>
             </Modal>
 
-            {/* PENALTY MODALS (Local Only) */}
-            <Modal visible={!!pendingAccusation && isBriefingMode && gameData?.is_local} transparent animationType="slide">
+            {/* FIX: Modal visibility now intelligently applies to BOTH online and local games! */}
+            <Modal visible={!!pendingAccusation && (gameData?.is_local ? isBriefingMode : true)} transparent animationType="slide">
                 <View style={styles.modalOverlay}>
                     <View style={styles.modalContent}>
                         <Ionicons name="alert-circle" size={60} color="#ff3b30" style={{alignSelf: 'center', marginBottom: 10}} />
                         <Text style={[styles.modalTitle, {textAlign: 'center'}]}>Cover Blown!</Text>
                         <Text style={{textAlign: 'center', marginBottom: 20, fontSize: 16}}>
-                            <Text style={{fontWeight: '900'}}>{pendingAccusation?.game_participants?.manual_name}</Text> reported you for:{"\n\n"}
+                            {/* FIX: Shows the profile username for online, and manual name for local */}
+                            <Text style={{fontWeight: '900'}}>
+                                {gameData?.is_local 
+                                    ? pendingAccusation?.game_participants?.manual_name 
+                                    : pendingAccusation?.game_participants?.profiles?.username}
+                            </Text> reported you for:{"\n\n"}
                             "{pendingAccusation?.description}"
                         </Text>
                         <Text style={{textAlign: 'center', fontWeight: 'bold', marginBottom: 20}}>Is this correct?</Text>
@@ -502,7 +523,7 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                 </View>
             </Modal>
 
-            <Modal visible={isSelectingFailure && gameData?.is_local} transparent animationType="fade">
+            <Modal visible={isSelectingFailure} transparent animationType="fade">
                 <View style={styles.modalOverlay}>
                     <View style={styles.modalContent}>
                         <Text style={styles.modalTitle}>Mission Failed</Text>
