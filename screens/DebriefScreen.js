@@ -10,21 +10,44 @@ export default function DebriefScreen({ gameId, onBack }) {
 
     useEffect(() => {
         const fetchResults = async () => {
-            const { data } = await supabase
-                .from('game_participants')
-                .select(`manual_name, user_missions(completed)`)
-                .eq('game_id', gameId);
+            try {
+                // 1. Check if the game is local or online
+                const { data: game } = await supabase
+                    .from('games')
+                    .select('is_local')
+                    .eq('id', gameId)
+                    .single();
 
-            if (data) {
-                const processed = data.map(p => ({
-                    name: p.manual_name || 'Unknown Agent',
-                    score: p.user_missions?.filter(m => m.completed).length || 0,
-                    total: p.user_missions?.length || 0
-                })).sort((a, b) => b.score - a.score);
-                setResults(processed);
+                // 2. Fetch participants WITH their profile data for online mode
+                const { data } = await supabase
+                    .from('game_participants')
+                    .select(`
+                        manual_name, 
+                        profiles(username),
+                        user_missions(completed)
+                    `)
+                    .eq('game_id', gameId);
+
+                if (data) {
+                    // 3. Process and map the correct names based on game mode
+                    const processed = data.map(p => ({
+                        // FIX: Dynamically assign name based on game type
+                        name: game?.is_local 
+                            ? (p.manual_name || 'Unknown Agent') 
+                            : (p.profiles?.username || 'Unknown Agent'),
+                        score: p.user_missions?.filter(m => m.completed).length || 0,
+                        total: p.user_missions?.length || 0
+                    })).sort((a, b) => b.score - a.score);
+                    
+                    setResults(processed);
+                }
+            } catch (error) {
+                console.error("Error fetching debrief:", error);
+            } finally {
+                setLoading(false);
             }
-            setLoading(false);
         };
+        
         fetchResults();
     }, [gameId]);
 
