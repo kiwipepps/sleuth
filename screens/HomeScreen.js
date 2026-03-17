@@ -6,8 +6,10 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import AsyncStorage from '@react-native-async-storage/async-storage'; // NEW
 import { supabase } from '../supabase';
 import ProfileScreen from './ProfileScreen';
+import TutorialModal from '../components/TutorialModal'; // NEW
 
 const screenWidth = Dimensions.get("window").width;
 
@@ -54,6 +56,9 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
     const [refreshing, setRefreshing] = useState(false);
     const [userId, setUserId] = useState(null);
 
+    // Tutorial State
+    const [isTutorialVisible, setTutorialVisible] = useState(false);
+
     // Scanner State
     const [permission, requestPermission] = useCameraPermissions();
     const [isScannerVisible, setScannerVisible] = useState(false);
@@ -61,7 +66,21 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
 
     useEffect(() => {
         getInitialData();
+        checkFirstLaunch(); // NEW
     }, []);
+
+    // --- NEW: Check if this is the user's first time opening the app ---
+    const checkFirstLaunch = async () => {
+        try {
+            const hasSeenTutorial = await AsyncStorage.getItem('hasSeenTutorial');
+            if (hasSeenTutorial === null) {
+                setTutorialVisible(true);
+                await AsyncStorage.setItem('hasSeenTutorial', 'true');
+            }
+        } catch (error) {
+            console.error("Error checking tutorial status:", error);
+        }
+    };
 
     const getInitialData = async () => {
         const { data: { user } } = await supabase.auth.getUser();
@@ -145,16 +164,14 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
     };
 
     const handleBarCodeScanned = async ({ type, data }) => {
-        if (scanned) return; // Prevent rapid-fire scanning
+        if (scanned) return; 
         setScanned(true);
         
         try {
-            // 1. Validate that the QR code is an actual game in the database
             const { data: game, error: gameErr } = await supabase.from('games').select('*').eq('id', data).single();
             if (gameErr || !game) throw new Error("Invalid or expired Operation Code.");
             if (game.status !== 'lobby') throw new Error("This Operation has already begun or ended.");
 
-            // 2. CHECK IF ALREADY JOINED
             const { data: existingParticipant } = await supabase
                 .from('game_participants')
                 .select('id')
@@ -169,7 +186,6 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                 return;
             }
 
-            // 3. Insert the user into the game
             const { error: insertErr } = await supabase.from('game_participants').insert([{
                 game_id: data,
                 user_id: userId,
@@ -178,13 +194,11 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
 
             if (insertErr) throw insertErr;
 
-            // 4. Close scanner and route them into the lobby!
             setScannerVisible(false);
             onJoinGame(data, 'lobby', game.host_id);
             
         } catch (err) {
             Alert.alert("Scan Failed", err.message || "Could not join the Operation.");
-            // Reset the scanner after a short delay so they can try again
             setTimeout(() => setScanned(false), 2000); 
         }
     };
@@ -301,6 +315,11 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                             <Text style={styles.headerTitle}>Operations</Text>
                         </View>
                         <View style={styles.headerActions}>
+                            {/* NEW: Help Button */}
+                            <TouchableOpacity onPress={() => setTutorialVisible(true)} style={styles.scanBtn}>
+                                <Ionicons name="help-outline" size={24} color="#000" />
+                            </TouchableOpacity>
+
                             <TouchableOpacity onPress={openScanner} style={styles.scanBtn}>
                                 <Ionicons name="qr-code-outline" size={24} color="#000" />
                             </TouchableOpacity>
@@ -346,7 +365,6 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                             />
                         )}
                         
-                        {/* Scanner UI Overlay */}
                         <SafeAreaView style={styles.scannerOverlay}>
                             <View style={styles.scannerHeader}>
                                 <TouchableOpacity onPress={() => setScannerVisible(false)} style={styles.scannerCloseBtn}>
@@ -360,6 +378,13 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                         </SafeAreaView>
                     </View>
                 </Modal>
+
+                {/* NEW: TUTORIAL MODAL */}
+                <TutorialModal 
+                    visible={isTutorialVisible} 
+                    onClose={() => setTutorialVisible(false)} 
+                />
+
             </View>
         </SafeAreaView>
     );
@@ -373,8 +398,8 @@ const styles = StyleSheet.create({
     headerTitle: { fontSize: 32, fontWeight: '900', color: '#000', letterSpacing: -1 },
     
     headerActions: { flexDirection: 'row', gap: 10, alignItems: 'center' },
-    scanBtn: { backgroundColor: '#f0f0f0', width: 48, height: 48, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
-    addBtn: { backgroundColor: '#000', width: 48, height: 48, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
+    scanBtn: { backgroundColor: '#f0f0f0', width: 44, height: 44, borderRadius: 14, justifyContent: 'center', alignItems: 'center' }, // Adjusted slightly for 3 buttons
+    addBtn: { backgroundColor: '#000', width: 44, height: 44, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
     
     content: { flex: 1 },
     list: { paddingHorizontal: 20, paddingBottom: 40, paddingTop: 10 },
