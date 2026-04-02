@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
     View, Text, StyleSheet, TouchableOpacity, Image, 
     ActivityIndicator, Alert, TextInput, ScrollView, Modal, KeyboardAvoidingView, Platform
@@ -8,23 +8,25 @@ import { decode } from 'base64-arraybuffer';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../supabase';
 
-export default function ProfileScreen() {
+// FIX 1: Accept the new resetScrollTick prop from HomeScreen
+export default function ProfileScreen({ resetScrollTick }) {
     const [user, setUser] = useState(null);
     const [profile, setProfile] = useState(null); 
     const [avatarUrl, setAvatarUrl] = useState(null); 
     const [uploading, setUploading] = useState(false);
     const [loading, setLoading] = useState(true);
 
-    // Edit Username State
     const [isEditModalVisible, setEditModalVisible] = useState(false);
     const [newUsername, setNewUsername] = useState('');
 
-    // Friends State
     const [activeTab, setActiveTab] = useState('friends'); 
     const [searchQuery, setSearchQuery] = useState('');
     const [searchResults, setSearchResults] = useState([]);
     const [friendsList, setFriendsList] = useState([]);
     const [friendsLoading, setFriendsLoading] = useState(false);
+
+    const scrollViewRef = useRef(null);
+    const [tabsY, setTabsY] = useState(0); // Stores the exact Y position of the tabs
 
     useEffect(() => {
         fetchUserAndProfile();
@@ -35,6 +37,13 @@ export default function ProfileScreen() {
             fetchFriends();
         }
     }, [activeTab, user]);
+
+    // FIX 2: Listen for the bottom nav tap to snap to the top
+    useEffect(() => {
+        if (resetScrollTick > 0) {
+            scrollViewRef.current?.scrollTo({ y: 0, animated: true });
+        }
+    }, [resetScrollTick]);
 
     const fetchUserAndProfile = async () => {
         try {
@@ -267,14 +276,16 @@ export default function ProfileScreen() {
     if (loading || !user || !profile) return <View style={styles.center}><ActivityIndicator size="large" color="#000" /></View>;
 
     return (
-        // FIX: Changed root to View.
-        <View style={{ flex: 1, backgroundColor: '#fff' }}>
+        <KeyboardAvoidingView 
+            style={{ flex: 1, backgroundColor: '#fff' }} 
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
             <ScrollView 
-                contentContainerStyle={{ paddingBottom: 100 }} // Added extra bottom padding 
+                ref={scrollViewRef} 
+                contentContainerStyle={{ paddingBottom: 400 }} 
                 showsVerticalScrollIndicator={false}
                 keyboardShouldPersistTaps="handled"
                 keyboardDismissMode="on-drag" 
-                automaticallyAdjustKeyboardInsets={true} // FIX: Magic prop! Automatically shifts content up seamlessly on iOS 16+
             >
                 <View style={styles.header}>
                     <TouchableOpacity style={styles.iconBtn}>
@@ -306,7 +317,11 @@ export default function ProfileScreen() {
                     {renderDetailRow("Password:", "**********", handlePasswordReset)}
                 </View>
 
-                <View style={styles.tabsContainer}>
+                {/* FIX 3: We grab the exact Y pixel coordinate of this container so we know where to scroll */}
+                <View 
+                    style={styles.tabsContainer}
+                    onLayout={(event) => setTabsY(event.nativeEvent.layout.y)}
+                >
                     <TouchableOpacity style={styles.tabBtn} onPress={() => { setActiveTab('friends'); setSearchQuery(''); }}>
                         <Ionicons name={activeTab === 'friends' ? "people" : "people-outline"} size={26} color={activeTab === 'friends' ? "#000" : "#aaa"} />
                         <Text style={[styles.tabText, activeTab === 'friends' && styles.tabTextActive]}>Friends</Text>
@@ -331,6 +346,12 @@ export default function ProfileScreen() {
                             onChangeText={activeTab === 'add' ? handleSearch : setSearchQuery}
                             autoCapitalize="none"
                             autoCorrect={false}
+                            // FIX 4: Scroll directly to the tabs coordinate!
+                            onFocus={() => {
+                                setTimeout(() => {
+                                    scrollViewRef.current?.scrollTo({ y: tabsY, animated: true });
+                                }, 150);
+                            }}
                         />
                     </View>
 
@@ -348,7 +369,6 @@ export default function ProfileScreen() {
                 </View>
             </ScrollView>
 
-            {/* EDIT USERNAME MODAL - Keep KAV here since Modals escape normal View hierarchy */}
             <Modal visible={isEditModalVisible} transparent animationType="fade">
                 <KeyboardAvoidingView 
                     style={{ flex: 1 }} 
@@ -377,7 +397,7 @@ export default function ProfileScreen() {
                     </View>
                 </KeyboardAvoidingView>
             </Modal>
-        </View>
+        </KeyboardAvoidingView>
     );
 }
 

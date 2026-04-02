@@ -6,10 +6,10 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import AsyncStorage from '@react-native-async-storage/async-storage'; // NEW
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../supabase';
 import ProfileScreen from './ProfileScreen';
-import TutorialModal from '../components/TutorialModal'; // NEW
+import TutorialModal from '../components/TutorialModal';
 
 const screenWidth = Dimensions.get("window").width;
 
@@ -56,6 +56,9 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
     const [refreshing, setRefreshing] = useState(false);
     const [userId, setUserId] = useState(null);
 
+    // NEW: State to trigger the scroll-to-top in ProfileScreen
+    const [profileScrollTick, setProfileScrollTick] = useState(0);
+
     // Tutorial State
     const [isTutorialVisible, setTutorialVisible] = useState(false);
 
@@ -66,10 +69,9 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
 
     useEffect(() => {
         getInitialData();
-        checkFirstLaunch(); // NEW
+        checkFirstLaunch();
     }, []);
 
-    // --- NEW: Check if this is the user's first time opening the app ---
     const checkFirstLaunch = async () => {
         try {
             const hasSeenTutorial = await AsyncStorage.getItem('hasSeenTutorial');
@@ -281,7 +283,8 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
             case 'achievements':
                 return <View style={styles.center}><Ionicons name="trophy" size={60} color="#eee" /><Text style={styles.comingSoon}>Awards Coming Soon</Text></View>;
             case 'profile':
-                return <ProfileScreen />;
+                // FIX: Pass the state down to the ProfileScreen
+                return <ProfileScreen resetScrollTick={profileScrollTick} />;
             default:
                 return (
                     <FlatList
@@ -315,7 +318,6 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                             <Text style={styles.headerTitle}>Operations</Text>
                         </View>
                         <View style={styles.headerActions}>
-                            {/* NEW: Help Button */}
                             <TouchableOpacity onPress={() => setTutorialVisible(true)} style={styles.scanBtn}>
                                 <Ionicons name="help-outline" size={24} color="#000" />
                             </TouchableOpacity>
@@ -347,7 +349,15 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                         <Ionicons name={activeTab === 'achievements' ? "trophy" : "trophy-outline"} size={22} color={activeTab === 'achievements' ? "#000" : "#aaa"} />
                         <Text style={[styles.navText, activeTab === 'achievements' && styles.navTextActive]}>Awards</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('profile')}>
+                    
+                    {/* FIX: Update this button to handle the scroll-to-top logic */}
+                    <TouchableOpacity style={styles.navItem} onPress={() => {
+                        if (activeTab === 'profile') {
+                            setProfileScrollTick(prev => prev + 1); // Trigger the jump if already on the screen
+                        } else {
+                            setActiveTab('profile'); // Otherwise just switch tabs normally
+                        }
+                    }}>
                         <Ionicons name={activeTab === 'profile' ? "person" : "person-outline"} size={22} color={activeTab === 'profile' ? "#000" : "#aaa"} />
                         <Text style={[styles.navText, activeTab === 'profile' && styles.navTextActive]}>Profile</Text>
                     </TouchableOpacity>
@@ -379,7 +389,7 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                     </View>
                 </Modal>
 
-                {/* NEW: TUTORIAL MODAL */}
+                {/* TUTORIAL MODAL */}
                 <TutorialModal 
                     visible={isTutorialVisible} 
                     onClose={() => setTutorialVisible(false)} 
@@ -398,7 +408,7 @@ const styles = StyleSheet.create({
     headerTitle: { fontSize: 32, fontWeight: '900', color: '#000', letterSpacing: -1 },
     
     headerActions: { flexDirection: 'row', gap: 10, alignItems: 'center' },
-    scanBtn: { backgroundColor: '#f0f0f0', width: 44, height: 44, borderRadius: 14, justifyContent: 'center', alignItems: 'center' }, // Adjusted slightly for 3 buttons
+    scanBtn: { backgroundColor: '#f0f0f0', width: 44, height: 44, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
     addBtn: { backgroundColor: '#000', width: 44, height: 44, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
     
     content: { flex: 1 },
