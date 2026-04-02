@@ -22,11 +22,15 @@ export default function ProfileScreen({ resetScrollTick }) {
     const [activeTab, setActiveTab] = useState('friends'); 
     const [searchQuery, setSearchQuery] = useState('');
     const [searchResults, setSearchResults] = useState([]);
+    
+    // Updated state to handle accepted friends, received requests, AND sent requests
     const [friendsList, setFriendsList] = useState([]);
+    const [pendingRequests, setPendingRequests] = useState([]);
+    const [sentRequests, setSentRequests] = useState([]); // <-- NEW STATE HERE
     const [friendsLoading, setFriendsLoading] = useState(false);
 
     const scrollViewRef = useRef(null);
-    const [tabsY, setTabsY] = useState(0); // Stores the exact Y position of the tabs
+    const [tabsY, setTabsY] = useState(0); 
 
     useEffect(() => {
         fetchUserAndProfile();
@@ -38,7 +42,6 @@ export default function ProfileScreen({ resetScrollTick }) {
         }
     }, [activeTab, user]);
 
-    // FIX 2: Listen for the bottom nav tap to snap to the top
     useEffect(() => {
         if (resetScrollTick > 0) {
             scrollViewRef.current?.scrollTo({ y: 0, animated: true });
@@ -160,8 +163,28 @@ export default function ProfileScreen({ resetScrollTick }) {
     const fetchFriends = async () => {
         setFriendsLoading(true);
         try {
-            const { data: added } = await supabase.from('friends').select('id, profiles!friends_friend_id_fkey(id, username, first_name, last_name, avatar_url)').eq('user_id', user.id);
-            const { data: addedMe } = await supabase.from('friends').select('id, profiles!friends_user_id_fkey(id, username, first_name, last_name, avatar_url)').eq('friend_id', user.id);
+            // Fetch ONLY accepted friends
+            const { data: added } = await supabase.from('friends')
+                .select('id, profiles!friends_friend_id_fkey(id, username, first_name, last_name, avatar_url)')
+                .eq('user_id', user.id)
+                .eq('status', 'accepted');
+                
+            const { data: addedMe } = await supabase.from('friends')
+                .select('id, profiles!friends_user_id_fkey(id, username, first_name, last_name, avatar_url)')
+                .eq('friend_id', user.id)
+                .eq('status', 'accepted');
+            
+            // Fetch pending requests RECEIVED by current user
+            const { data: pendingReceived } = await supabase.from('friends')
+                .select('id, profiles!friends_user_id_fkey(id, username, first_name, last_name, avatar_url)')
+                .eq('friend_id', user.id)
+                .eq('status', 'pending');
+
+            // NEW: Fetch pending requests SENT by current user
+            const { data: pendingSent } = await supabase.from('friends')
+                .select('friend_id')
+                .eq('user_id', user.id)
+                .eq('status', 'pending');
             
             const formattedAdded = (added || []).map(f => ({ rowId: f.id, ...f.profiles }));
             const formattedAddedMe = (addedMe || []).map(f => ({ rowId: f.id, ...f.profiles }));
@@ -170,6 +193,10 @@ export default function ProfileScreen({ resetScrollTick }) {
             const uniqueFriends = Array.from(new Map(combined.map(item => [item.id, item])).values());
             
             setFriendsList(uniqueFriends);
+            setPendingRequests((pendingReceived || []).map(p => ({ rowId: p.id, ...p.profiles })));
+            
+            // Save an array of IDs of the people we sent requests to
+            setSentRequests((pendingSent || []).map(p => p.friend_id));
         } catch (err) {
             console.error("Error fetching friends:", err);
         } finally {
@@ -195,18 +222,28 @@ export default function ProfileScreen({ resetScrollTick }) {
         } catch (err) { console.error(err); }
     };
 
+    // --- UPDATED: Add Friend instantly changes state to 'Pending' ---
     const handleAddFriend = async (friendProfileId) => {
+        // Optimistically update the UI to instantly show "Pending"
+        setSentRequests(prev => [...prev, friendProfileId]);
+
         try {
-            const { error } = await supabase.from('friends').insert([{ user_id: user.id, friend_id: friendProfileId }]);
+            const { error } = await supabase.from('friends').insert([
+                { user_id: user.id, friend_id: friendProfileId, status: 'pending' }
+            ]);
+            
             if (error) {
-                if (error.code === '23505') Alert.alert("Already Added", "You are already friends with this agent.");
-                else throw error;
-            } else {
-                setSearchQuery('');
-                setSearchResults([]);
-                setActiveTab('friends');
+                // If it's a unique constraint error (23505), it was already sent, 
+                // so showing "Pending" is actually still correct. We only revert on real errors.
+                if (error.code !== '23505') {
+                    console.error("Error sending request:", error);
+                    setSentRequests(prev => prev.filter(id => id !== friendProfileId));
+                }
             }
-        } catch (err) { Alert.alert("Error", "Could not add friend."); }
+        } catch (err) { 
+            console.error("Could not send friend request.", err); 
+            setSentRequests(prev => prev.filter(id => id !== friendProfileId));
+        }
     };
 
     const handleRemoveFriend = async (friendRowId) => {
@@ -217,6 +254,32 @@ export default function ProfileScreen({ resetScrollTick }) {
                 if (!error) setFriendsList(prev => prev.filter(f => f.rowId !== friendRowId));
             }}
         ]);
+    };
+
+    const handleAcceptRequest = async (rowId) => {
+        const { error } = await supabase.from('friends')
+            .update({ status: 'accepted' })
+            .eq('id', rowId);
+            
+        if (error) {
+            console.error("Error accepting request:", error);
+            Alert.alert("Permission Error", "Could not accept request. Make sure your RLS UPDATE policy is configured!");
+        } else {
+            fetchFriends(); // Refresh lists to move them to Active Friends
+        }
+    };
+
+    const handleDeclineRequest = async (rowId) => {
+        const { error } = await supabase.from('friends')
+            .delete()
+            .eq('id', rowId);
+            
+        if (error) {
+            console.error("Error declining request:", error);
+            Alert.alert("Permission Error", "Could not decline request. Make sure your RLS DELETE policy is configured!");
+        } else {
+            setPendingRequests(prev => prev.filter(req => req.rowId !== rowId));
+        }
     };
 
     const handleSignOut = async () => {
@@ -238,8 +301,11 @@ export default function ProfileScreen({ resetScrollTick }) {
         </View>
     );
 
+    // --- UPDATED: Render Friend Card checks 'isPending' ---
     const renderFriendCard = (friend, isSearch = false) => {
         const isAdded = isSearch && friendsList.some(f => f.id === friend.id);
+        const isPending = isSearch && sentRequests.includes(friend.id);
+        
         const fullName = friend.first_name || friend.last_name 
             ? `${friend.first_name || ''} ${friend.last_name || ''}`.trim() 
             : 'Unknown Agent';
@@ -264,6 +330,8 @@ export default function ProfileScreen({ resetScrollTick }) {
                     </TouchableOpacity>
                 ) : isAdded ? (
                     <View style={styles.removeBtn}><Text style={styles.removeBtnText}>Added</Text></View>
+                ) : isPending ? (
+                    <View style={styles.removeBtn}><Text style={styles.removeBtnText}>Pending</Text></View>
                 ) : (
                     <TouchableOpacity style={styles.addBtn} onPress={() => handleAddFriend(friend.id)}>
                         <Text style={styles.addBtnText}>Add</Text>
@@ -317,7 +385,6 @@ export default function ProfileScreen({ resetScrollTick }) {
                     {renderDetailRow("Password:", "**********", handlePasswordReset)}
                 </View>
 
-                {/* FIX 3: We grab the exact Y pixel coordinate of this container so we know where to scroll */}
                 <View 
                     style={styles.tabsContainer}
                     onLayout={(event) => setTabsY(event.nativeEvent.layout.y)}
@@ -346,7 +413,6 @@ export default function ProfileScreen({ resetScrollTick }) {
                             onChangeText={activeTab === 'add' ? handleSearch : setSearchQuery}
                             autoCapitalize="none"
                             autoCorrect={false}
-                            // FIX 4: Scroll directly to the tabs coordinate!
                             onFocus={() => {
                                 setTimeout(() => {
                                     scrollViewRef.current?.scrollTo({ y: tabsY, animated: true });
@@ -357,11 +423,53 @@ export default function ProfileScreen({ resetScrollTick }) {
 
                     {activeTab === 'friends' ? (
                         friendsLoading ? <ActivityIndicator color="#000" style={{marginTop: 20}} /> :
-                        friendsList.filter(f => f.username?.toLowerCase().includes(searchQuery.toLowerCase())).length > 0 ? (
-                            friendsList.filter(f => f.username?.toLowerCase().includes(searchQuery.toLowerCase())).map(f => renderFriendCard(f, false))
-                        ) : (
-                            <Text style={styles.emptyText}>No friends found.</Text>
-                        )
+                        <View>
+                            {/* --- PENDING REQUESTS SECTION --- */}
+                            {pendingRequests.length > 0 && (
+                                <View style={{ marginBottom: 25 }}>
+                                    <Text style={{ fontSize: 14, fontWeight: 'bold', color: '#666', marginBottom: 10, paddingHorizontal: 5 }}>
+                                        Pending Requests ({pendingRequests.length})
+                                    </Text>
+                                    {pendingRequests.map(req => (
+                                        <View key={req.id} style={styles.friendCard}>
+                                            <View style={styles.friendInfoLeft}>
+                                                {req.avatar_url ? (
+                                                    <Image source={{uri: req.avatar_url}} style={styles.friendAvatarImage} />
+                                                ) : (
+                                                    <View style={styles.friendAvatarPlaceholder}><Ionicons name="person" size={20} color="#aaa" /></View>
+                                                )}
+                                                <View>
+                                                    <Text style={styles.friendUsername}>{req.username}</Text>
+                                                    <Text style={styles.friendName}>wants to connect</Text>
+                                                </View>
+                                            </View>
+                                            <View style={{ flexDirection: 'row', gap: 8 }}>
+                                                <TouchableOpacity 
+                                                    style={[styles.addBtn, { backgroundColor: '#4CAF50', paddingHorizontal: 15 }]} 
+                                                    onPress={() => handleAcceptRequest(req.rowId)}
+                                                >
+                                                    <Text style={styles.addBtnText}>Accept</Text>
+                                                </TouchableOpacity>
+                                                <TouchableOpacity 
+                                                    style={[styles.removeBtn, { paddingHorizontal: 15 }]} 
+                                                    onPress={() => handleDeclineRequest(req.rowId)}
+                                                >
+                                                    <Text style={styles.removeBtnText}>Decline</Text>
+                                                </TouchableOpacity>
+                                            </View>
+                                        </View>
+                                    ))}
+                                    <View style={[styles.separator, { marginTop: 15, marginBottom: 5 }]} />
+                                </View>
+                            )}
+
+                            {/* --- EXISTING FRIENDS LIST --- */}
+                            {friendsList.filter(f => f.username?.toLowerCase().includes(searchQuery.toLowerCase())).length > 0 ? (
+                                friendsList.filter(f => f.username?.toLowerCase().includes(searchQuery.toLowerCase())).map(f => renderFriendCard(f, false))
+                            ) : (
+                                <Text style={styles.emptyText}>No friends found.</Text>
+                            )}
+                        </View>
                     ) : (
                         searchResults.length > 0 ? searchResults.map(r => renderFriendCard(r, true)) : 
                         searchQuery.length > 1 ? <Text style={styles.emptyText}>No users found.</Text> : null
