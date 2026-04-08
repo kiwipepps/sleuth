@@ -113,7 +113,12 @@ export default function GameSetupModal({ visible, onClose, onCreated, userId }) 
                 await Promise.all(assignmentPromises);
                 onCreated(game.id, 'local-reveal', userId);
             } else {
-                await supabase.from('game_participants').insert([{ game_id: game.id, user_id: userId }]);
+                // FIX: explicitly set is_ready to true for the host!
+                await supabase.from('game_participants').insert([{ 
+                    game_id: game.id, 
+                    user_id: userId,
+                    is_ready: true 
+                }]);
                 onCreated(game.id, 'lobby', userId);
             }
             resetForm();

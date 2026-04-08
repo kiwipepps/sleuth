@@ -51,8 +51,17 @@ export default function Lobby({ gameId, isHost, onBack }) {
 
             if (isHost) {
                 const { data: { user } } = await supabase.auth.getUser();
-                const { data: added } = await supabase.from('friends').select('profiles!friends_friend_id_fkey(id, username, avatar_url)').eq('user_id', user.id);
-                const { data: addedMe } = await supabase.from('friends').select('profiles!friends_user_id_fkey(id, username, avatar_url)').eq('friend_id', user.id);
+                
+                // FIX: Added .eq('status', 'accepted') so only actual friends show up in the invite list
+                const { data: added } = await supabase.from('friends')
+                    .select('profiles!friends_friend_id_fkey(id, username, avatar_url)')
+                    .eq('user_id', user.id)
+                    .eq('status', 'accepted');
+                    
+                const { data: addedMe } = await supabase.from('friends')
+                    .select('profiles!friends_user_id_fkey(id, username, avatar_url)')
+                    .eq('friend_id', user.id)
+                    .eq('status', 'accepted');
                 
                 const combined = [...(added || []).map(f => f.profiles), ...(addedMe || []).map(f => f.profiles)];
                 const uniqueFriends = Array.from(new Map(combined.map(item => [item.id, item])).values());
@@ -141,7 +150,6 @@ export default function Lobby({ gameId, isHost, onBack }) {
         }
     };
 
-    // FIX: Updated to distribute missions to all players before starting the game
     const handleStartGame = async () => {
         if (participants.length < 2) return Alert.alert("Not Enough Agents", "You need at least 2 agents to start.");
         

@@ -52,11 +52,11 @@ const GameTimer = ({ endTime, onExpire }) => {
 export default function HomeScreen({ onCreatePress, onJoinGame }) {
     const [activeTab, setActiveTab] = useState('home'); 
     const [games, setGames] = useState([]);
+    const [invites, setInvites] = useState([]);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [userId, setUserId] = useState(null);
 
-    // NEW: State to trigger the scroll-to-top in ProfileScreen
     const [profileScrollTick, setProfileScrollTick] = useState(0);
 
     // Tutorial State
@@ -103,25 +103,56 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
     const fetchUserGames = async (currentUserId) => {
         if (!currentUserId) return;
         try {
+            // Fetch hosted games
             const { data: hostedGames } = await supabase
                 .from('games')
                 .select('*')
                 .eq('host_id', currentUserId);
 
+            // Fetch joined games AND their is_ready status
             const { data: participantData } = await supabase
                 .from('game_participants')
-                .select('games(*)')
+                .select('is_ready, games(*)')
                 .eq('user_id', currentUserId);
 
-            const joinedGames = participantData?.map(item => item.games).filter(Boolean) || [];
-            const combined = [...(hostedGames || []), ...joinedGames];
+            const invitesList = [];
+            const operationsList = [];
             const uniqueGamesMap = new Map();
 
-            combined.forEach(game => uniqueGamesMap.set(game.id, game));
-            const uniqueGames = Array.from(uniqueGamesMap.values());
-            uniqueGames.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            // 1. Process Hosted Games (Hosts are automatically 'ready' for their own games)
+            (hostedGames || []).forEach(game => {
+                uniqueGamesMap.set(game.id, game);
+                operationsList.push(game);
+            });
 
-            setGames(uniqueGames);
+            // 2. Process Participant Games based on is_ready flag
+            (participantData || []).forEach(record => {
+                const game = record.games;
+                if (!game) return;
+                
+                // Skip if we already processed it as the host
+                if (uniqueGamesMap.has(game.id)) return;
+                
+                uniqueGamesMap.set(game.id, game);
+
+                // FIX: Instead of strict === false, we check if it is NOT true.
+                // This catches null, undefined, or explicitly false database returns.
+                if (record.is_ready !== true) {
+                    // Only show the invite if the game hasn't officially ended
+                    if (game.status !== 'completed') {
+                        invitesList.push(game);
+                    }
+                } else {
+                    operationsList.push(game);
+                }
+            });
+
+            // Sort both lists by newest first
+            invitesList.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            operationsList.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            setInvites(invitesList);
+            setGames(operationsList);
         } catch (error) {
             console.error("Error fetching games:", error.message);
         } finally {
@@ -153,7 +184,64 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
         );
     };
 
-    // --- SCANNER LOGIC ---
+    // --- FIX: Updated with .select() to catch RLS errors silently blocking the update
+    const handleAcceptInvite = async (game) => {
+        try {
+            // Update the user's status to ready in the database
+            const { data, error } = await supabase.from('game_participants')
+                .update({ is_ready: true })
+                .eq('game_id', game.id)
+                .eq('user_id', userId)
+                .select();
+            
+            if (error) throw error;
+
+            if (!data || data.length === 0) {
+                return Alert.alert("Permission Denied", "Database blocked the update. Check your RLS UPDATE policy!");
+            }
+
+            // Optimistically update the UI to instantly move it to "My Operations"
+            setInvites(prev => prev.filter(inv => inv.id !== game.id));
+            setGames(prev => [game, ...prev]);
+
+            // Determine where to send them based on the CURRENT game status
+            const isExpired = new Date(game.end_time).getTime() < new Date().getTime();
+            const displayStatus = (game.status === 'completed' || (game.status === 'active' && isExpired)) 
+                ? 'completed' : (game.status || 'lobby');
+            
+            const route = displayStatus === 'active' ? 'play' : displayStatus === 'completed' ? 'debrief' : 'lobby';
+            
+            onJoinGame(game.id, route, game.host_id);
+        } catch (err) {
+            console.error(err);
+            Alert.alert("Error", "Could not accept the invitation.");
+        }
+    };
+
+    const handleDeclineInvite = async (gameId) => {
+        try {
+            // Delete user_missions FIRST in case the game already started and tasks were generated
+            await supabase.from('user_missions')
+                .delete()
+                .eq('game_id', gameId)
+                .eq('user_id', userId);
+
+            // Then remove them from the participant lobby
+            const { error } = await supabase.from('game_participants')
+                .delete()
+                .eq('game_id', gameId)
+                .eq('user_id', userId);
+            
+            if (error) throw error;
+            
+            // Optimistically remove from UI
+            setInvites(prev => prev.filter(inv => inv.id !== gameId));
+        } catch (err) {
+            console.error(err);
+            Alert.alert("Error", "Could not decline the invitation.");
+        }
+    };
+
     const openScanner = async () => {
         if (!permission?.granted) {
             const { granted } = await requestPermission();
@@ -191,7 +279,7 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
             const { error: insertErr } = await supabase.from('game_participants').insert([{
                 game_id: data,
                 user_id: userId,
-                is_ready: false
+                is_ready: true 
             }]);
 
             if (insertErr) throw insertErr;
@@ -283,7 +371,6 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
             case 'achievements':
                 return <View style={styles.center}><Ionicons name="trophy" size={60} color="#eee" /><Text style={styles.comingSoon}>Awards Coming Soon</Text></View>;
             case 'profile':
-                // FIX: Pass the state down to the ProfileScreen
                 return <ProfileScreen resetScrollTick={profileScrollTick} />;
             default:
                 return (
@@ -294,12 +381,50 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                         contentContainerStyle={styles.list}
                         showsVerticalScrollIndicator={false}
                         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => fetchUserGames(userId)} tintColor="#000" />}
-                        ListEmptyComponent={
-                            <View style={styles.emptyContainer}>
-                                <Ionicons name="document-text-outline" size={60} color="#f0f0f0" />
-                                <Text style={styles.emptyTitle}>No Missions Yet</Text>
-                                <Text style={styles.emptySub}>Create an operation to begin.</Text>
+                        
+                        ListHeaderComponent={
+                            <View>
+                                {invites.length > 0 && (
+                                    <View style={styles.invitesSection}>
+                                        <Text style={styles.sectionHeader}>Incoming Operations ({invites.length})</Text>
+                                        {invites.map(item => (
+                                            <View key={item.id} style={styles.inviteCard}>
+                                                <View style={styles.inviteInfo}>
+                                                    <View style={styles.inviteIconWrapper}>
+                                                        <Ionicons name="mail-unread" size={24} color="#007AFF" />
+                                                    </View>
+                                                    <View style={{flex: 1}}>
+                                                        <Text style={styles.inviteGameName} numberOfLines={1}>{item.game_name}</Text>
+                                                        <Text style={styles.inviteSubText}>
+                                                            {item.status === 'active' ? "Operation active. Agents waiting." : "Waiting for agents in lobby..."}
+                                                        </Text>
+                                                    </View>
+                                                </View>
+                                                <View style={styles.inviteActions}>
+                                                    <TouchableOpacity style={[styles.inviteBtn, styles.declineBtn]} onPress={() => handleDeclineInvite(item.id)}>
+                                                        <Text style={styles.declineBtnText}>Decline</Text>
+                                                    </TouchableOpacity>
+                                                    <TouchableOpacity style={[styles.inviteBtn, styles.acceptBtn]} onPress={() => handleAcceptInvite(item)}>
+                                                        <Text style={styles.acceptBtnText}>{item.status === 'active' ? "Join Active Game" : "Enter Lobby"}</Text>
+                                                    </TouchableOpacity>
+                                                </View>
+                                            </View>
+                                        ))}
+                                    </View>
+                                )}
+                                {games.length > 0 && (
+                                    <Text style={[styles.sectionHeader, { marginTop: invites.length > 0 ? 10 : 0 }]}>My Operations</Text>
+                                )}
                             </View>
+                        }
+                        ListEmptyComponent={
+                            invites.length === 0 ? (
+                                <View style={styles.emptyContainer}>
+                                    <Ionicons name="document-text-outline" size={60} color="#f0f0f0" />
+                                    <Text style={styles.emptyTitle}>No Missions Yet</Text>
+                                    <Text style={styles.emptySub}>Create an operation to begin.</Text>
+                                </View>
+                            ) : null
                         }
                     />
                 );
@@ -349,13 +474,11 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                         <Ionicons name={activeTab === 'achievements' ? "trophy" : "trophy-outline"} size={22} color={activeTab === 'achievements' ? "#000" : "#aaa"} />
                         <Text style={[styles.navText, activeTab === 'achievements' && styles.navTextActive]}>Awards</Text>
                     </TouchableOpacity>
-                    
-                    {/* FIX: Update this button to handle the scroll-to-top logic */}
                     <TouchableOpacity style={styles.navItem} onPress={() => {
                         if (activeTab === 'profile') {
-                            setProfileScrollTick(prev => prev + 1); // Trigger the jump if already on the screen
+                            setProfileScrollTick(prev => prev + 1);
                         } else {
-                            setActiveTab('profile'); // Otherwise just switch tabs normally
+                            setActiveTab('profile');
                         }
                     }}>
                         <Ionicons name={activeTab === 'profile' ? "person" : "person-outline"} size={22} color={activeTab === 'profile' ? "#000" : "#aaa"} />
@@ -389,12 +512,7 @@ export default function HomeScreen({ onCreatePress, onJoinGame }) {
                     </View>
                 </Modal>
 
-                {/* TUTORIAL MODAL */}
-                <TutorialModal 
-                    visible={isTutorialVisible} 
-                    onClose={() => setTutorialVisible(false)} 
-                />
-
+                <TutorialModal visible={isTutorialVisible} onClose={() => setTutorialVisible(false)} />
             </View>
         </SafeAreaView>
     );
@@ -413,6 +531,21 @@ const styles = StyleSheet.create({
     
     content: { flex: 1 },
     list: { paddingHorizontal: 20, paddingBottom: 40, paddingTop: 10 },
+
+    invitesSection: { marginBottom: 20 },
+    sectionHeader: { fontSize: 13, fontWeight: '800', color: '#888', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 15, marginLeft: 5 },
+    inviteCard: { backgroundColor: '#F4F9FF', borderRadius: 20, padding: 18, marginBottom: 12, borderWidth: 1, borderColor: '#D3E8FF' },
+    inviteInfo: { flexDirection: 'row', alignItems: 'center', marginBottom: 15 },
+    inviteIconWrapper: { width: 46, height: 46, borderRadius: 23, backgroundColor: '#E1F0FF', justifyContent: 'center', alignItems: 'center', marginRight: 15 },
+    inviteGameName: { fontSize: 18, fontWeight: '800', color: '#003366', marginBottom: 2 },
+    inviteSubText: { fontSize: 13, color: '#0066CC', fontWeight: '600' },
+    inviteActions: { flexDirection: 'row', gap: 10 },
+    inviteBtn: { flex: 1, paddingVertical: 12, borderRadius: 12, alignItems: 'center' },
+    declineBtn: { backgroundColor: '#E8F2FC' },
+    declineBtnText: { color: '#0066CC', fontWeight: '800', fontSize: 13 },
+    acceptBtn: { backgroundColor: '#007AFF', shadowColor: '#007AFF', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4, elevation: 2 },
+    acceptBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+
     cardWrapper: { position: 'relative', marginBottom: 20 },
     gameCard: { backgroundColor: '#fff', borderRadius: 24, borderWidth: 1, borderColor: '#f0f0f0', overflow: 'hidden', elevation: 3, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.08, shadowRadius: 12 },
     deleteIconBtn: { position: 'absolute', bottom: 100, right: 15, backgroundColor: 'rgba(255,255,255,0.9)', width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center', zIndex: 10, borderWidth: 1, borderColor: '#eee' },
@@ -445,7 +578,6 @@ const styles = StyleSheet.create({
     emptyTitle: { fontSize: 20, fontWeight: '900', marginTop: 15 },
     emptySub: { fontSize: 14, color: '#aaa', textAlign: 'center', marginTop: 10 },
 
-    // Scanner Styles
     scannerContainer: { flex: 1, backgroundColor: '#000' },
     scannerOverlay: { flex: 1, justifyContent: 'space-between' },
     scannerHeader: { flexDirection: 'row', justifyContent: 'flex-end', padding: 20 },

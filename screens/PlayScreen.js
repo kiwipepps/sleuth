@@ -115,7 +115,6 @@ export default function PlayScreen({ gameId, onBack, userId }) {
         ]);
     };
 
-    // FIX: Abstracted this so we can call it on load and during real-time updates
     async function fetchPendingAccusations(participantId) {
         const { data: reports } = await supabase.from('call_outs')
             .select('*, game_participants!caller_id(id, manual_name, profiles(username))')
@@ -149,7 +148,6 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                     fetchUserCalloutCount(me.id);
                     fetchGlobalIntel();
                     
-                    // FIX: Check for accusations immediately upon loading the screen!
                     const report = await fetchPendingAccusations(me.id);
                     if (report) setPendingAccusation(report);
                 }
@@ -191,20 +189,27 @@ export default function PlayScreen({ gameId, onBack, userId }) {
         setUserCalloutCount(count || 0);
     }
 
+    // FIX: Catch RLS silent failures
     const toggleMissionCompletion = async (missionId, currentStatus, missionStatus) => {
         if (missionStatus === 'failed' || gameData?.status === 'completed') return;
         
         if (currentStatus) {
-            setMissions(prev => prev.map(m => m.id === missionId ? { ...m, completed: false } : m));
-            await supabase.from('user_missions').update({ completed: false }).eq('id', missionId);
-            fetchGlobalStats();
+            try {
+                const { data, error } = await supabase.from('user_missions').update({ completed: false }).eq('id', missionId).select();
+                if (error || !data?.length) throw new Error("Permission denied. Database blocked the update.");
+                setMissions(prev => prev.map(m => m.id === missionId ? { ...m, completed: false } : m));
+                fetchGlobalStats();
+            } catch (err) { Alert.alert("Error", err.message); }
         } else {
             Alert.alert("Confirm", "Did you successfully complete this order?", [
                 { text: "Cancel", style: "cancel" },
                 { text: "Confirm", onPress: async () => {
-                    setMissions(prev => prev.map(m => m.id === missionId ? { ...m, completed: true } : m));
-                    await supabase.from('user_missions').update({ completed: true }).eq('id', missionId);
-                    fetchGlobalStats();
+                    try {
+                        const { data, error } = await supabase.from('user_missions').update({ completed: true }).eq('id', missionId).select();
+                        if (error || !data?.length) throw new Error("Permission denied. Database blocked the update.");
+                        setMissions(prev => prev.map(m => m.id === missionId ? { ...m, completed: true } : m));
+                        fetchGlobalStats();
+                    } catch (err) { Alert.alert("Error", err.message); }
                 }}
             ]);
         }
@@ -252,31 +257,49 @@ export default function PlayScreen({ gameId, onBack, userId }) {
         }
     };
 
+    // FIX: Prevent empty modal trap and catch RLS silent failures
     const handleResolveAccusation = async (isCorrect) => {
         try {
-            await supabase.from('call_outs').update({ is_resolved: true, status: isCorrect ? 'accepted' : 'incorrect' }).eq('id', pendingAccusation.id);
-            setPendingAccusation(null);
+            const { data, error } = await supabase.from('call_outs')
+                .update({ is_resolved: true, status: isCorrect ? 'accepted' : 'incorrect' })
+                .eq('id', pendingAccusation.id)
+                .select();
+                
+            if (error || !data?.length) throw new Error("Permission Denied. Could not resolve.");
             
-            if (gameData?.is_local) {
-                setIsBriefingMode(false);
-            }
+            setPendingAccusation(null);
+            if (gameData?.is_local) setIsBriefingMode(false);
 
             if (isCorrect) {
                 await fetchMissions(activeParticipant.id);
-                setIsSelectingFailure(true); 
+                // Check if they actually have missions they can forfeit
+                const availableToFail = missions.filter(m => !m.completed && m.status !== 'failed');
+                
+                if (availableToFail.length > 0) {
+                    setIsSelectingFailure(true); 
+                } else {
+                    Alert.alert("Cover Blown", "You have been caught! However, you have no active missions left to forfeit.");
+                }
             } else {
                 fetchMissions(activeParticipant.id);
             }
-        } catch (err) { Alert.alert("Error", "Update failed."); }
+        } catch (err) { Alert.alert("Error", err.message); }
     };
 
+    // FIX: Catch RLS silent failures
     const handleMarkMissionFailed = async (missionId) => {
         try {
-            await supabase.from('user_missions').update({ status: 'failed', completed: false }).eq('id', missionId);
+            const { data, error } = await supabase.from('user_missions')
+                .update({ status: 'failed', completed: false })
+                .eq('id', missionId)
+                .select();
+                
+            if (error || !data?.length) throw new Error("Permission Denied. Could not forfeit mission.");
+            
             setIsSelectingFailure(false); 
             fetchMissions(activeParticipant.id); 
             fetchGlobalStats();
-        } catch (err) { Alert.alert("Error", "Failed to update."); }
+        } catch (err) { Alert.alert("Error", err.message); }
     };
 
     const handleSwitchAgent = (agent) => { 
@@ -395,7 +418,7 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                     </View>
                 ) : null}
 
-                {(gameData?.is_local && activeParticipant && !isBriefingMode) || (!gameData?.is_local && activeTab === 'missions') ? (
+                {((gameData?.is_local && activeParticipant && !isBriefingMode) || (!gameData?.is_local && activeTab === 'missions')) ? (
                     <>
                         <View style={styles.sectionHeader}>
                             <Text style={styles.sectionTitle}>Objectives</Text>
@@ -494,14 +517,12 @@ export default function PlayScreen({ gameId, onBack, userId }) {
                 </KeyboardAvoidingView>
             </Modal>
 
-            {/* FIX: Modal visibility now intelligently applies to BOTH online and local games! */}
             <Modal visible={!!pendingAccusation && (gameData?.is_local ? isBriefingMode : true)} transparent animationType="slide">
                 <View style={styles.modalOverlay}>
                     <View style={styles.modalContent}>
                         <Ionicons name="alert-circle" size={60} color="#ff3b30" style={{alignSelf: 'center', marginBottom: 10}} />
                         <Text style={[styles.modalTitle, {textAlign: 'center'}]}>Cover Blown!</Text>
                         <Text style={{textAlign: 'center', marginBottom: 20, fontSize: 16}}>
-                            {/* FIX: Shows the profile username for online, and manual name for local */}
                             <Text style={{fontWeight: '900'}}>
                                 {gameData?.is_local 
                                     ? pendingAccusation?.game_participants?.manual_name 
