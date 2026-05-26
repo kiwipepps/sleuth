@@ -1,0 +1,550 @@
+import React, { useState, useEffect } from 'react';
+import {
+    View, Text, StyleSheet, FlatList, TouchableOpacity,
+    Image, ActivityIndicator, RefreshControl, Platform, StatusBar, Alert, Dimensions, Modal
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { supabase } from '../supabase';
+import ProfileScreen from './ProfileScreen';
+import TutorialModal from '../components/TutorialModal';
+import GameTimer from '../components/GameTimer';
+
+const screenWidth = Dimensions.get("window").width;
+
+export default function HomeScreen({ onCreatePress, onJoinGame, sessionUser }) {
+    const [activeTab, setActiveTab] = useState('home'); 
+    const [games, setGames] = useState([]);
+    const [invites, setInvites] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
+    const [userId, setUserId] = useState(null);
+
+    const [profileScrollTick, setProfileScrollTick] = useState(0);
+
+    // Tutorial State
+    const [isTutorialVisible, setTutorialVisible] = useState(false);
+
+    // Scanner State
+    const [permission, requestPermission] = useCameraPermissions();
+    const [isScannerVisible, setScannerVisible] = useState(false);
+    const [scanned, setScanned] = useState(false);
+
+    useEffect(() => {
+        getInitialData();
+        checkFirstLaunch();
+    }, []);
+
+    const checkFirstLaunch = async () => {
+        try {
+            const hasSeenTutorial = await AsyncStorage.getItem('hasSeenTutorial');
+            if (hasSeenTutorial === null) {
+                setTutorialVisible(true);
+                await AsyncStorage.setItem('hasSeenTutorial', 'true');
+            }
+        } catch (error) {
+            console.error("Error checking tutorial status:", error);
+        }
+    };
+
+    const getInitialData = async () => {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+            setUserId(user.id);
+            fetchUserGames(user.id);
+        }
+    };
+
+    const handleAutoArchive = async (gameId) => {
+        await supabase
+            .from('games')
+            .update({ status: 'completed' })
+            .eq('id', gameId)
+            .eq('status', 'active'); 
+    };
+
+    const fetchUserGames = async (currentUserId) => {
+        if (!currentUserId) return;
+        try {
+            // Fetch hosted games
+            const { data: hostedGames } = await supabase
+                .from('games')
+                .select('*')
+                .eq('host_id', currentUserId);
+
+            // Fetch joined games AND their is_ready status
+            const { data: participantData } = await supabase
+                .from('game_participants')
+                .select('is_ready, games(*)')
+                .eq('user_id', currentUserId);
+
+            const invitesList = [];
+            const operationsList = [];
+            const uniqueGamesMap = new Map();
+
+            // 1. Process Hosted Games (Hosts are automatically 'ready' for their own games)
+            (hostedGames || []).forEach(game => {
+                uniqueGamesMap.set(game.id, game);
+                operationsList.push(game);
+            });
+
+            // 2. Process Participant Games based on is_ready flag
+            (participantData || []).forEach(record => {
+                const game = record.games;
+                if (!game) return;
+                
+                // Skip if we already processed it as the host
+                if (uniqueGamesMap.has(game.id)) return;
+                
+                uniqueGamesMap.set(game.id, game);
+
+                // FIX: Instead of strict === false, we check if it is NOT true.
+                // This catches null, undefined, or explicitly false database returns.
+                if (record.is_ready !== true) {
+                    // Only show the invite if the game hasn't officially ended
+                    if (game.status !== 'completed') {
+                        invitesList.push(game);
+                    }
+                } else {
+                    operationsList.push(game);
+                }
+            });
+
+            // Sort both lists by newest first
+            invitesList.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            operationsList.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            setInvites(invitesList);
+            setGames(operationsList);
+        } catch (error) {
+            console.error("Error fetching games:", error.message);
+        } finally {
+            setLoading(false);
+            setRefreshing(false);
+        }
+    };
+
+    const handleDeleteGame = async (gameId, gameName) => {
+        Alert.alert(
+            "Terminate Operation?",
+            `Are you sure you want to delete "${gameName}"?`,
+            [
+                { text: "Cancel", style: "cancel" },
+                {
+                    text: "Delete",
+                    style: "destructive",
+                    onPress: async () => {
+                        try {
+                            const { error } = await supabase.from('games').delete().eq('id', gameId);
+                            if (error) throw error;
+                            setGames(prev => prev.filter(g => g.id !== gameId));
+                        } catch (err) {
+                            Alert.alert("Error", "Could not delete game.");
+                        }
+                    }
+                }
+            ]
+        );
+    };
+
+    // --- FIX: Updated with .select() to catch RLS errors silently blocking the update
+    const handleAcceptInvite = async (game) => {
+        try {
+            // Update the user's status to ready in the database
+            const { data, error } = await supabase.from('game_participants')
+                .update({ is_ready: true })
+                .eq('game_id', game.id)
+                .eq('user_id', userId)
+                .select();
+            
+            if (error) throw error;
+
+            if (!data || data.length === 0) {
+                return Alert.alert("Permission Denied", "Database blocked the update. Check your RLS UPDATE policy!");
+            }
+
+            // Optimistically update the UI to instantly move it to "My Operations"
+            setInvites(prev => prev.filter(inv => inv.id !== game.id));
+            setGames(prev => [game, ...prev]);
+
+            // Determine where to send them based on the CURRENT game status
+            const isExpired = new Date(game.end_time).getTime() < new Date().getTime();
+            const displayStatus = (game.status === 'completed' || (game.status === 'active' && isExpired)) 
+                ? 'completed' : (game.status || 'lobby');
+            
+            const route = displayStatus === 'active' ? 'play' : displayStatus === 'completed' ? 'debrief' : 'lobby';
+            
+            onJoinGame(game.id, route, game.host_id);
+        } catch (err) {
+            console.error(err);
+            Alert.alert("Error", "Could not accept the invitation.");
+        }
+    };
+
+    const handleDeclineInvite = async (gameId) => {
+        try {
+            // Delete user_missions FIRST in case the game already started and tasks were generated
+            await supabase.from('user_missions')
+                .delete()
+                .eq('game_id', gameId)
+                .eq('user_id', userId);
+
+            // Then remove them from the participant lobby
+            const { error } = await supabase.from('game_participants')
+                .delete()
+                .eq('game_id', gameId)
+                .eq('user_id', userId);
+            
+            if (error) throw error;
+            
+            // Optimistically remove from UI
+            setInvites(prev => prev.filter(inv => inv.id !== gameId));
+        } catch (err) {
+            console.error(err);
+            Alert.alert("Error", "Could not decline the invitation.");
+        }
+    };
+
+    const openScanner = async () => {
+        if (!permission?.granted) {
+            const { granted } = await requestPermission();
+            if (!granted) {
+                return Alert.alert("Permission Required", "Camera access is needed to scan Operation codes.");
+            }
+        }
+        setScanned(false);
+        setScannerVisible(true);
+    };
+
+    const handleBarCodeScanned = async ({ type, data }) => {
+        if (scanned) return; 
+        setScanned(true);
+        
+        try {
+            const { data: game, error: gameErr } = await supabase.from('games').select('*').eq('id', data).single();
+            if (gameErr || !game) throw new Error("Invalid or expired Operation Code.");
+            if (game.status !== 'lobby') throw new Error("This Operation has already begun or ended.");
+
+            const { data: existingParticipant } = await supabase
+                .from('game_participants')
+                .select('id')
+                .eq('game_id', data)
+                .eq('user_id', userId)
+                .maybeSingle();
+
+            if (existingParticipant) {
+                setScannerVisible(false);
+                Alert.alert("Already Joined", "You are already in this Operation.");
+                onJoinGame(data, 'lobby', game.host_id);
+                return;
+            }
+
+            const { error: insertErr } = await supabase.from('game_participants').insert([{
+                game_id: data,
+                user_id: userId,
+                is_ready: true 
+            }]);
+
+            if (insertErr) throw insertErr;
+
+            setScannerVisible(false);
+            onJoinGame(data, 'lobby', game.host_id);
+            
+        } catch (err) {
+            Alert.alert("Scan Failed", err.message || "Could not join the Operation.");
+            setTimeout(() => setScanned(false), 2000); 
+        }
+    };
+
+    const renderGameItem = ({ item }) => {
+        const isHost = item.host_id === userId;
+        const isExpired = new Date(item.end_time).getTime() < new Date().getTime();
+        const displayStatus = (item.status === 'completed' || (item.status === 'active' && isExpired)) 
+            ? 'completed' 
+            : (item.status || 'lobby');
+
+        return (
+            <View style={styles.cardWrapper}>
+                <TouchableOpacity
+                    style={styles.gameCard}
+                    onPress={() => onJoinGame(item.id, displayStatus === 'active' ? 'play' : displayStatus === 'completed' ? 'debrief' : 'lobby', item.host_id)}
+                >
+                    {item.cover_image ? (
+                        <Image source={{ uri: item.cover_image }} style={styles.cardImage} />
+                    ) : (
+                        <View style={[styles.cardImage, styles.placeholderContainer]}>
+                            <Ionicons name="map-outline" size={40} color="#ccc" />
+                        </View>
+                    )}
+
+                    <View style={styles.cardOverlay}>
+                        {displayStatus === 'active' && (
+                            <GameTimer 
+                                endTime={item.end_time} 
+                                onExpire={() => handleAutoArchive(item.id)} 
+                            />
+                        )}
+                        
+                        <View style={[
+                            styles.statusBadge, 
+                            displayStatus === 'active' ? styles.activeBadge : 
+                            displayStatus === 'completed' ? styles.completedBadge : styles.lobbyBadge
+                        ]}>
+                            <Text style={[styles.statusText, displayStatus === 'completed' && styles.completedText]}>
+                                {displayStatus.toUpperCase()}
+                            </Text>
+                        </View>
+                    </View>
+
+                    <View style={styles.cardFooter}>
+                        <View style={{ flex: 1 }}>
+                            <Text style={styles.gameName} numberOfLines={1}>{item.game_name}</Text>
+                            <View style={styles.metaRow}>
+                                <Ionicons name={item.is_local ? "phone-portrait-outline" : "globe-outline"} size={12} color="#888" />
+                                <Text style={styles.metaText}>{item.is_local ? " Local" : " Online"}</Text>
+                                {isHost && (
+                                    <View style={styles.hostIndicator}>
+                                        <Text style={styles.hostIndicatorText}>HOST</Text>
+                                    </View>
+                                )}
+                            </View>
+                        </View>
+                        <Ionicons name="chevron-forward" size={20} color="#ccc" />
+                    </View>
+                </TouchableOpacity>
+
+                {isHost && (
+                    <TouchableOpacity
+                        style={styles.deleteIconBtn}
+                        onPress={() => handleDeleteGame(item.id, item.game_name)}
+                    >
+                        <Ionicons name="trash-outline" size={20} color="#ff3b30" />
+                    </TouchableOpacity>
+                )}
+            </View>
+        );
+    };
+
+    const renderContent = () => {
+        if (loading) return <View style={styles.center}><ActivityIndicator size="large" color="#000" /></View>;
+
+        switch (activeTab) {
+            case 'packs':
+                return <View style={styles.center}><Ionicons name="layers" size={60} color="#eee" /><Text style={styles.comingSoon}>Mission Packs Coming Soon</Text></View>;
+            case 'achievements':
+                return <View style={styles.center}><Ionicons name="trophy" size={60} color="#eee" /><Text style={styles.comingSoon}>Awards Coming Soon</Text></View>;
+            case 'profile':
+                return <ProfileScreen resetScrollTick={profileScrollTick} sessionUser={sessionUser} />;
+            default:
+                return (
+                    <FlatList
+                        data={games}
+                        keyExtractor={(item) => item.id}
+                        renderItem={renderGameItem}
+                        contentContainerStyle={styles.list}
+                        showsVerticalScrollIndicator={false}
+                        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => fetchUserGames(userId)} tintColor="#000" />}
+                        
+                        ListHeaderComponent={
+                            <View>
+                                {invites.length > 0 && (
+                                    <View style={styles.invitesSection}>
+                                        <Text style={styles.sectionHeader}>Incoming Operations ({invites.length})</Text>
+                                        {invites.map(item => (
+                                            <View key={item.id} style={styles.inviteCard}>
+                                                <View style={styles.inviteInfo}>
+                                                    <View style={styles.inviteIconWrapper}>
+                                                        <Ionicons name="mail-unread" size={24} color="#007AFF" />
+                                                    </View>
+                                                    <View style={{flex: 1}}>
+                                                        <Text style={styles.inviteGameName} numberOfLines={1}>{item.game_name}</Text>
+                                                        <Text style={styles.inviteSubText}>
+                                                            {item.status === 'active' ? "Operation active. Agents waiting." : "Waiting for agents in lobby..."}
+                                                        </Text>
+                                                    </View>
+                                                </View>
+                                                <View style={styles.inviteActions}>
+                                                    <TouchableOpacity style={[styles.inviteBtn, styles.declineBtn]} onPress={() => handleDeclineInvite(item.id)}>
+                                                        <Text style={styles.declineBtnText}>Decline</Text>
+                                                    </TouchableOpacity>
+                                                    <TouchableOpacity style={[styles.inviteBtn, styles.acceptBtn]} onPress={() => handleAcceptInvite(item)}>
+                                                        <Text style={styles.acceptBtnText}>{item.status === 'active' ? "Join Active Game" : "Enter Lobby"}</Text>
+                                                    </TouchableOpacity>
+                                                </View>
+                                            </View>
+                                        ))}
+                                    </View>
+                                )}
+                                {games.length > 0 && (
+                                    <Text style={[styles.sectionHeader, { marginTop: invites.length > 0 ? 10 : 0 }]}>My Operations</Text>
+                                )}
+                            </View>
+                        }
+                        ListEmptyComponent={
+                            invites.length === 0 ? (
+                                <View style={styles.emptyContainer}>
+                                    <Ionicons name="document-text-outline" size={60} color="#f0f0f0" />
+                                    <Text style={styles.emptyTitle}>No Missions Yet</Text>
+                                    <Text style={styles.emptySub}>Create an operation to begin.</Text>
+                                </View>
+                            ) : null
+                        }
+                    />
+                );
+        }
+    };
+
+    return (
+        <SafeAreaView style={styles.safeArea} edges={['top']}>
+            <StatusBar barStyle="dark-content" />
+            <View style={styles.container}>
+                
+                {activeTab === 'home' && (
+                    <View style={styles.header}>
+                        <View>
+                            <Text style={styles.headerLabel}>Intelligence Brief</Text>
+                            <Text style={styles.headerTitle}>Operations</Text>
+                        </View>
+                        <View style={styles.headerActions}>
+                            <TouchableOpacity onPress={() => setTutorialVisible(true)} style={styles.scanBtn}>
+                                <Ionicons name="help-outline" size={24} color="#000" />
+                            </TouchableOpacity>
+
+                            <TouchableOpacity onPress={openScanner} style={styles.scanBtn}>
+                                <Ionicons name="qr-code-outline" size={24} color="#000" />
+                            </TouchableOpacity>
+                            <TouchableOpacity onPress={onCreatePress} style={styles.addBtn}>
+                                <Ionicons name="add" size={28} color="#fff" />
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                )}
+
+                <View style={styles.content}>
+                    {renderContent()}
+                </View>
+
+                <View style={styles.navBar}>
+                    <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('home')}>
+                        <Ionicons name={activeTab === 'home' ? "home" : "home-outline"} size={22} color={activeTab === 'home' ? "#000" : "#aaa"} />
+                        <Text style={[styles.navText, activeTab === 'home' && styles.navTextActive]}>Home</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('packs')}>
+                        <Ionicons name={activeTab === 'packs' ? "layers" : "layers-outline"} size={22} color={activeTab === 'packs' ? "#000" : "#aaa"} />
+                        <Text style={[styles.navText, activeTab === 'packs' && styles.navTextActive]}>Packs</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('achievements')}>
+                        <Ionicons name={activeTab === 'achievements' ? "trophy" : "trophy-outline"} size={22} color={activeTab === 'achievements' ? "#000" : "#aaa"} />
+                        <Text style={[styles.navText, activeTab === 'achievements' && styles.navTextActive]}>Awards</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.navItem} onPress={() => {
+                        if (activeTab === 'profile') {
+                            setProfileScrollTick(prev => prev + 1);
+                        } else {
+                            setActiveTab('profile');
+                        }
+                    }}>
+                        <Ionicons name={activeTab === 'profile' ? "person" : "person-outline"} size={22} color={activeTab === 'profile' ? "#000" : "#aaa"} />
+                        <Text style={[styles.navText, activeTab === 'profile' && styles.navTextActive]}>Profile</Text>
+                    </TouchableOpacity>
+                </View>
+
+                {/* SCANNER MODAL */}
+                <Modal visible={isScannerVisible} animationType="slide" transparent={false}>
+                    <View style={styles.scannerContainer}>
+                        {isScannerVisible && permission?.granted && (
+                            <CameraView 
+                                style={StyleSheet.absoluteFillObject} 
+                                facing="back"
+                                onBarcodeScanned={scanned ? undefined : handleBarCodeScanned}
+                                barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                            />
+                        )}
+                        
+                        <SafeAreaView style={styles.scannerOverlay}>
+                            <View style={styles.scannerHeader}>
+                                <TouchableOpacity onPress={() => setScannerVisible(false)} style={styles.scannerCloseBtn}>
+                                    <Ionicons name="close" size={30} color="#fff" />
+                                </TouchableOpacity>
+                            </View>
+                            <View style={styles.scannerTargetArea}>
+                                <View style={styles.targetBox} />
+                                <Text style={styles.scannerInstruction}>Scan an Operation Code to join</Text>
+                            </View>
+                        </SafeAreaView>
+                    </View>
+                </Modal>
+
+                <TutorialModal visible={isTutorialVisible} onClose={() => setTutorialVisible(false)} />
+            </View>
+        </SafeAreaView>
+    );
+}
+
+const styles = StyleSheet.create({
+    safeArea: { flex: 1, backgroundColor: '#fff' },
+    container: { flex: 1 },
+    header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 25, paddingTop: 10, paddingBottom: 15 },
+    headerLabel: { fontSize: 12, fontWeight: '700', color: '#aaa', textTransform: 'uppercase', letterSpacing: 1 },
+    headerTitle: { fontSize: 32, fontWeight: '900', color: '#000', letterSpacing: -1 },
+    
+    headerActions: { flexDirection: 'row', gap: 10, alignItems: 'center' },
+    scanBtn: { backgroundColor: '#f0f0f0', width: 44, height: 44, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
+    addBtn: { backgroundColor: '#000', width: 44, height: 44, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
+    
+    content: { flex: 1 },
+    list: { paddingHorizontal: 20, paddingBottom: 40, paddingTop: 10 },
+
+    invitesSection: { marginBottom: 20 },
+    sectionHeader: { fontSize: 13, fontWeight: '800', color: '#888', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 15, marginLeft: 5 },
+    inviteCard: { backgroundColor: '#F4F9FF', borderRadius: 20, padding: 18, marginBottom: 12, borderWidth: 1, borderColor: '#D3E8FF' },
+    inviteInfo: { flexDirection: 'row', alignItems: 'center', marginBottom: 15 },
+    inviteIconWrapper: { width: 46, height: 46, borderRadius: 23, backgroundColor: '#E1F0FF', justifyContent: 'center', alignItems: 'center', marginRight: 15 },
+    inviteGameName: { fontSize: 18, fontWeight: '800', color: '#003366', marginBottom: 2 },
+    inviteSubText: { fontSize: 13, color: '#0066CC', fontWeight: '600' },
+    inviteActions: { flexDirection: 'row', gap: 10 },
+    inviteBtn: { flex: 1, paddingVertical: 12, borderRadius: 12, alignItems: 'center' },
+    declineBtn: { backgroundColor: '#E8F2FC' },
+    declineBtnText: { color: '#0066CC', fontWeight: '800', fontSize: 13 },
+    acceptBtn: { backgroundColor: '#007AFF', shadowColor: '#007AFF', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4, elevation: 2 },
+    acceptBtnText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+
+    cardWrapper: { position: 'relative', marginBottom: 20 },
+    gameCard: { backgroundColor: '#fff', borderRadius: 24, borderWidth: 1, borderColor: '#f0f0f0', overflow: 'hidden', elevation: 3, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.08, shadowRadius: 12 },
+    deleteIconBtn: { position: 'absolute', bottom: 100, right: 15, backgroundColor: 'rgba(255,255,255,0.9)', width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center', zIndex: 10, borderWidth: 1, borderColor: '#eee' },
+    cardImage: { width: '100%', height: 180 },
+    placeholderContainer: { backgroundColor: '#f9f9f9', justifyContent: 'center', alignItems: 'center' },
+    cardOverlay: { position: 'absolute', top: 15, right: 15, flexDirection: 'row', gap: 8, alignItems: 'center' },
+    statusBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10 },
+    activeBadge: { backgroundColor: '#E8F5E9' },
+    lobbyBadge: { backgroundColor: '#FFF3E0' },
+    completedBadge: { backgroundColor: '#F5F5F5' },
+    statusText: { fontSize: 10, fontWeight: '900', color: '#444' },
+    completedText: { color: '#aaa' },
+    cardFooter: { padding: 20, flexDirection: 'row', alignItems: 'center' },
+    gameName: { fontSize: 20, fontWeight: '800', color: '#000', marginBottom: 4 },
+    metaRow: { flexDirection: 'row', alignItems: 'center' },
+    metaText: { fontSize: 13, color: '#888', fontWeight: '500' },
+    hostIndicator: { backgroundColor: '#000', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, marginLeft: 10 },
+    hostIndicatorText: { color: '#fff', fontSize: 9, fontWeight: '900' },
+    
+    navBar: { flexDirection: 'row', backgroundColor: '#fff', paddingTop: 12, paddingBottom: Platform.OS === 'ios' ? 25 : 15, borderTopWidth: 1, borderTopColor: '#f0f0f0', justifyContent: 'space-around', alignItems: 'center' },
+    navItem: { alignItems: 'center', gap: 4 },
+    navText: { fontSize: 10, fontWeight: '800', color: '#aaa' },
+    navTextActive: { color: '#000' },
+    center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+    comingSoon: { marginTop: 15, color: '#ccc', fontWeight: '700' },
+    emptyContainer: { alignItems: 'center', marginTop: 50, paddingHorizontal: 40 },
+    emptyTitle: { fontSize: 20, fontWeight: '900', marginTop: 15 },
+    emptySub: { fontSize: 14, color: '#aaa', textAlign: 'center', marginTop: 10 },
+
+    scannerContainer: { flex: 1, backgroundColor: '#000' },
+    scannerOverlay: { flex: 1, justifyContent: 'space-between' },
+    scannerHeader: { flexDirection: 'row', justifyContent: 'flex-end', padding: 20 },
+    scannerCloseBtn: { width: 44, height: 44, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 22, justifyContent: 'center', alignItems: 'center' },
+    scannerTargetArea: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+    targetBox: { width: 250, height: 250, borderWidth: 2, borderColor: '#fff', borderRadius: 20, backgroundColor: 'transparent' },
+    scannerInstruction: { color: '#fff', fontSize: 16, fontWeight: '700', marginTop: 30, backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 15, paddingVertical: 8, borderRadius: 20 }
+});
